@@ -21,6 +21,7 @@ interface ShellState {
   syncError: string | null;
   loadError: string | null;
   paneNotes: Record<string, string>;
+  reopenNonce: number;
   boot: () => Promise<void>;
   setLayout: (layout: LayoutMode) => Promise<void>;
   focusPane: (index: number) => Promise<void>;
@@ -45,22 +46,51 @@ function snapshot(state: ShellState): WorkspaceFile {
 }
 
 let chain: Promise<void> = Promise.resolve();
+let revision = 0;
 
 export const useShellStore = create<ShellState>((set, get) => {
-  const commit = (next: WorkspaceFile, extra?: Partial<ShellState>) => {
+  const commit = (
+    recipe: (file: WorkspaceFile) => WorkspaceFile,
+    extra?: Partial<ShellState>,
+  ) => {
+    const current = snapshot(get());
+    const next = recipe(current);
+    if (next === current) {
+      if (extra) {
+        set(extra);
+      }
+      return Promise.resolve();
+    }
+    const rev = ++revision;
+    set({
+      layout: next.layout,
+      slots: next.slots,
+      focusedPane: next.focusedPane,
+      customApps: next.customApps,
+      loadError: null,
+      ...extra,
+    });
     const task = async () => {
+      if (rev !== revision) {
+        return;
+      }
+      const latest = snapshot(get());
       try {
-        const saved = await saveWorkspace(next);
+        const saved = await saveWorkspace(latest);
+        if (rev !== revision) {
+          return;
+        }
         set({
           layout: saved.layout,
           slots: saved.slots,
           focusedPane: saved.focusedPane,
           customApps: saved.customApps,
           loadError: null,
-          ...extra,
         });
       } catch (reason: unknown) {
-        set({ loadError: errorText(reason) });
+        if (rev === revision) {
+          set({ loadError: errorText(reason) });
+        }
       }
     };
     const run = chain.then(task, task);
@@ -85,6 +115,7 @@ export const useShellStore = create<ShellState>((set, get) => {
     syncError: null,
     loadError: null,
     paneNotes: {},
+    reopenNonce: 0,
     boot: async () => {
       try {
         const file = await loadWorkspace();
@@ -104,57 +135,67 @@ export const useShellStore = create<ShellState>((set, get) => {
         });
       }
     },
-    setLayout: (layout) => {
-      const state = get();
-      const focusedPane =
-        state.focusedPane >= visibleCount(layout) ? 0 : state.focusedPane;
-      return commit({ ...snapshot(state), layout, focusedPane });
-    },
+    setLayout: (layout) =>
+      commit((file) => {
+        const focusedPane = file.focusedPane >= visibleCount(layout) ? 0 : file.focusedPane;
+        return { ...file, layout, focusedPane };
+      }),
     focusPane: async (index) => {
-      const state = get();
-      if (index < 0 || index >= visibleCount(state.layout)) {
+      if (index < 0 || index >= visibleCount(get().layout)) {
         return;
       }
-      if (index === state.focusedPane) {
-        await focusSlot(index);
-        return;
-      }
-      await commit({ ...snapshot(state), focusedPane: index });
+      await commit((file) => {
+        if (index < 0 || index >= visibleCount(file.layout) || index === file.focusedPane) {
+          return file;
+        }
+        return { ...file, focusedPane: index };
+      });
       await focusSlot(index);
     },
     assignApp: async (appId) => {
-      const state = get();
-      const slots = [...state.slots];
-      const existing = slots.findIndex((slot) => slot === appId);
-      if (existing === state.focusedPane) {
-        set({ inspectedId: null });
-        await focusSlot(state.focusedPane);
-        return;
+      let reopen = false;
+      await commit((file) => {
+        const slots = [...file.slots];
+        const existing = slots.findIndex((slot) => slot === appId);
+        if (existing === file.focusedPane) {
+          reopen = true;
+          return file;
+        }
+        if (existing >= 0) {
+          slots[existing] = null;
+        }
+        slots[file.focusedPane] = appId;
+        return { ...file, slots };
+      }, { inspectedId: null });
+      if (reopen) {
+        set((state) => {
+          const paneNotes = { ...state.paneNotes };
+          delete paneNotes[appId];
+          return {
+            inspectedId: null,
+            reopenNonce: state.reopenNonce + 1,
+            paneNotes,
+          };
+        });
       }
-      if (existing >= 0) {
-        slots[existing] = null;
-      }
-      slots[state.focusedPane] = appId;
-      await commit({ ...snapshot(state), slots }, { inspectedId: null });
       await focusSlot(get().focusedPane);
     },
-    clearPane: (index) => {
-      const state = get();
-      if (!state.slots[index]) {
-        return Promise.resolve();
-      }
-      const slots = state.slots.map((slot, slotIndex) => (slotIndex === index ? null : slot));
-      return commit({ ...snapshot(state), slots });
-    },
-    clearAllPanes: () => {
-      const state = get();
-      return commit({
-        ...snapshot(state),
+    clearPane: (index) =>
+      commit((file) => {
+        if (!file.slots[index]) {
+          return file;
+        }
+        return {
+          ...file,
+          slots: file.slots.map((slot, slotIndex) => (slotIndex === index ? null : slot)),
+        };
+      }),
+    clearAllPanes: () =>
+      commit((file) => ({
+        ...file,
         slots: [null, null, null, null],
-      });
-    },
+      })),
     addCustomUrl: async (raw) => {
-      const state = get();
       let url: string;
       try {
         url = normalizeHttpUrl(raw);
@@ -162,30 +203,30 @@ export const useShellStore = create<ShellState>((set, get) => {
         set({ loadError: errorText(reason) });
         return;
       }
-      const existing = state.customApps.find((app) => app.url === url);
+      const existing = get().customApps.find((app) => app.url === url);
       if (existing) {
         await get().assignApp(existing.id);
         return;
       }
       const id = `custom-${crypto.randomUUID()}`;
-      const customApps = [...state.customApps, { id, name: new URL(url).hostname, url }];
-      const slots = [...state.slots];
-      const previous = slots.findIndex((slot) => slot === id);
-      if (previous >= 0) {
-        slots[previous] = null;
-      }
-      slots[state.focusedPane] = id;
-      await commit({ ...snapshot(state), customApps, slots }, { inspectedId: null });
+      const name = new URL(url).hostname;
+      await commit((file) => {
+        const slots = [...file.slots];
+        slots[file.focusedPane] = id;
+        return {
+          ...file,
+          customApps: [...file.customApps, { id, name, url }],
+          slots,
+        };
+      }, { inspectedId: null });
       await focusSlot(get().focusedPane);
     },
-    removeCustom: (id) => {
-      const state = get();
-      return commit({
-        ...snapshot(state),
-        customApps: state.customApps.filter((app) => app.id !== id),
-        slots: state.slots.map((slot) => (slot === id ? null : slot)),
-      });
-    },
+    removeCustom: (id) =>
+      commit((file) => ({
+        ...file,
+        customApps: file.customApps.filter((app) => app.id !== id),
+        slots: file.slots.map((slot) => (slot === id ? null : slot)),
+      })),
     inspect: (id) => set({ inspectedId: id }),
     setSyncError: (message) => set({ syncError: message }),
     notePane: (appId, message) =>

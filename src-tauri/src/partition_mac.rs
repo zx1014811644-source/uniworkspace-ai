@@ -12,7 +12,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use objc2::rc::Retained;
@@ -37,8 +37,10 @@ use crate::partition::{
 static OAUTH_SEQ: AtomicU64 = AtomicU64::new(1);
 static PROBE_SEQ: AtomicU64 = AtomicU64::new(1);
 static PROBE_BUSY: AtomicBool = AtomicBool::new(false);
-static PANES: Mutex<HashMap<String, LivePane>> = Mutex::new(HashMap::new());
-static GATES: Mutex<HashMap<String, RebuildGate>> = Mutex::new(HashMap::new());
+static PANES: LazyLock<Mutex<HashMap<String, LivePane>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GATES: LazyLock<Mutex<HashMap<String, RebuildGate>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static FOCUSED_LABEL: Mutex<String> = Mutex::new(String::new());
 
 #[derive(Clone)]
@@ -144,6 +146,7 @@ fn ensure_visible(
         }
         return Ok(());
     }
+    reset_rebuild_gate(&label);
     create_child(app, &label, pane, kind)?;
     if pane.focus {
         if let Some(webview) = app.get_webview(&label) {
@@ -296,6 +299,11 @@ fn focus_once(webview: &tauri::Webview, label: &str) -> Result<(), String> {
     webview.set_focus().map_err(|err| err.to_string())?;
     *focused = label.to_string();
     Ok(())
+}
+
+fn reset_rebuild_gate(label: &str) {
+    let mut gates = GATES.lock().unwrap_or_else(|err| err.into_inner());
+    gates.remove(label);
 }
 
 fn allow_rebuild(label: &str) -> bool {

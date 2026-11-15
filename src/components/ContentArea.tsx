@@ -27,6 +27,7 @@ function PaneGrid() {
   const slots = useShellStore((state) => state.slots);
   const customApps = useShellStore((state) => state.customApps);
   const focusedPane = useShellStore((state) => state.focusedPane);
+  const reopenNonce = useShellStore((state) => state.reopenNonce);
   const syncError = useShellStore((state) => state.syncError);
   const setSyncError = useShellStore((state) => state.setSyncError);
   const hosts = useRef<(HTMLDivElement | null)[]>([]);
@@ -93,7 +94,7 @@ function PaneGrid() {
       observer.disconnect();
       window.removeEventListener("resize", schedule);
     };
-  }, [count, customApps, focusedPane, layout, setSyncError, slots]);
+  }, [count, customApps, focusedPane, layout, reopenNonce, setSyncError, slots]);
 
   const gridClass =
     layout === "single"
