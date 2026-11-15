@@ -343,7 +343,7 @@ impl LiveProbe {
         if let Err(err) = webview.eval_with_callback(script, move |raw| {
             let step = next.clone();
             let hop = step.clone();
-            let app_id = callback_id;
+            let app_id = callback_id.clone();
             let _ = hop
                 .app
                 .run_on_main_thread(move || match parse_marker(&raw) {
