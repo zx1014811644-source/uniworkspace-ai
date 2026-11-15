@@ -490,8 +490,7 @@ fn scan_once(app: &AppHandle) -> Result<DesktopScan, String> {
     }
 }
 
-#[tauri::command]
-pub fn desktop_scan(app: AppHandle) -> Result<DesktopScan, String> {
+fn desktop_scan_blocking(app: AppHandle) -> Result<DesktopScan, String> {
     if SCAN_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return Err("上一次检测还在进行".into());
     }
@@ -499,13 +498,7 @@ pub fn desktop_scan(app: AppHandle) -> Result<DesktopScan, String> {
     scan_once(&app)
 }
 
-#[tauri::command]
-pub fn a11y_status(app: AppHandle) -> A11yStatus {
-    status_now(&app, current_trusted(&app))
-}
-
-#[tauri::command]
-pub fn a11y_request(app: AppHandle) -> Result<A11yStatus, String> {
+fn a11y_request_blocking(app: AppHandle) -> Result<A11yStatus, String> {
     #[cfg(target_os = "macos")]
     let trusted = crate::window_mac::prompt(&app)?;
     #[cfg(not(target_os = "macos"))]
@@ -519,8 +512,7 @@ pub fn a11y_request(app: AppHandle) -> Result<A11yStatus, String> {
     }
 }
 
-#[tauri::command]
-pub fn a11y_open_settings(app: AppHandle) -> Result<(), String> {
+fn a11y_open_settings_blocking(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         crate::window_mac::open_settings(&app)
@@ -532,12 +524,46 @@ pub fn a11y_open_settings(app: AppHandle) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub fn a11y_choose(app: AppHandle, choice: A11yChoice) -> Result<A11yStatus, String> {
+fn a11y_choose_blocking(app: AppHandle, choice: A11yChoice) -> Result<A11yStatus, String> {
     let trusted = current_trusted(&app);
     let choice = apply_choice(choice, trusted)?;
     store_choice(&support_dir(&app)?, choice)?;
     Ok(status_now(&app, trusted))
+}
+
+/// Sync commands run on the main thread. These wait on loopback connects and on
+/// `run_on_main_thread`, so the wait itself has to stay on the blocking pool.
+async fn off_main<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|err| format!("后台任务中断: {err}"))
+}
+
+#[tauri::command]
+pub async fn desktop_scan(app: AppHandle) -> Result<DesktopScan, String> {
+    off_main(move || desktop_scan_blocking(app)).await?
+}
+
+#[tauri::command]
+pub async fn a11y_status(app: AppHandle) -> Result<A11yStatus, String> {
+    off_main(move || status_now(&app, current_trusted(&app))).await
+}
+
+#[tauri::command]
+pub async fn a11y_request(app: AppHandle) -> Result<A11yStatus, String> {
+    off_main(move || a11y_request_blocking(app)).await?
+}
+
+#[tauri::command]
+pub async fn a11y_open_settings(app: AppHandle) -> Result<(), String> {
+    off_main(move || a11y_open_settings_blocking(app)).await?
+}
+
+#[tauri::command]
+pub async fn a11y_choose(app: AppHandle, choice: A11yChoice) -> Result<A11yStatus, String> {
+    off_main(move || a11y_choose_blocking(app, choice)).await?
 }
 
 #[cfg(test)]

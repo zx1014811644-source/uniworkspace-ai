@@ -73,6 +73,8 @@ mod macos {
         on_main(app, open_settings_on_main)?
     }
 
+    /// The caller must not already be the main thread. `run_on_main_thread` only
+    /// queues the closure, so waiting here from the main thread would deadlock.
     fn on_main<T: Send + 'static>(
         app: &AppHandle,
         work: impl FnOnce() -> T + Send + 'static,
