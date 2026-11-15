@@ -1,4 +1,15 @@
 import { create } from "zustand";
+import {
+  a11yChoose,
+  a11yOpenSettings,
+  a11yRequest,
+  a11yStatus,
+  type A11yChoice,
+  type DetectedDesktop,
+  type DesktopScan,
+  type ListedWindow,
+  type ServiceStatus,
+} from "./desktop";
 import { errorText, focusPartition } from "./partitions";
 import {
   defaultWorkspace,
@@ -10,6 +21,7 @@ import {
   type LayoutMode,
   type WorkspaceFile,
 } from "./workspace";
+import { runningInTauri } from "./window";
 
 interface ShellState {
   ready: boolean;
@@ -22,17 +34,49 @@ interface ShellState {
   loadError: string | null;
   paneNotes: Record<string, string>;
   reopenNonce: number;
+  detectedApps: DetectedDesktop[];
+  services: ServiceStatus[];
+  windows: ListedWindow[];
+  windowNote: string | null;
+  designated: ListedWindow[];
+  scanned: boolean;
+  scanError: string | null;
+  a11yReady: boolean;
+  a11yOpen: boolean;
+  a11yTrusted: boolean;
+  a11yChoice: A11yChoice;
+  a11yError: string | null;
   boot: () => Promise<void>;
   setLayout: (layout: LayoutMode) => Promise<void>;
   focusPane: (index: number) => Promise<void>;
   assignApp: (appId: string) => Promise<void>;
   clearPane: (index: number) => Promise<void>;
   clearAllPanes: () => Promise<void>;
-  addCustomUrl: (raw: string) => Promise<void>;
+  addCustomUrl: (raw: string, displayName?: string) => Promise<void>;
   removeCustom: (id: string) => Promise<void>;
   inspect: (id: string | null) => void;
   setSyncError: (message: string | null) => void;
   notePane: (appId: string, message: string) => void;
+  applyScan: (scan: DesktopScan) => void;
+  setScanError: (message: string | null) => void;
+  designate: (window: ListedWindow) => void;
+  undesignate: (windowId: number) => void;
+  reopenA11y: () => void;
+  hideA11y: () => void;
+  requestA11y: () => Promise<void>;
+  openA11ySettings: () => Promise<void>;
+  refreshA11y: () => Promise<void>;
+  chooseA11y: (choice: A11yChoice) => Promise<void>;
+}
+
+const A11Y_KEY = "uniworkspace.a11y.v1";
+
+function savedBrowserChoice(): A11yChoice {
+  const saved = localStorage.getItem(A11Y_KEY);
+  if (saved === "granted" || saved === "webOnly") {
+    return saved;
+  }
+  return "pending";
 }
 
 function snapshot(state: ShellState): WorkspaceFile {
@@ -116,6 +160,18 @@ export const useShellStore = create<ShellState>((set, get) => {
     loadError: null,
     paneNotes: {},
     reopenNonce: 0,
+    detectedApps: [],
+    services: [],
+    windows: [],
+    windowNote: null,
+    designated: [],
+    scanned: false,
+    scanError: null,
+    a11yReady: false,
+    a11yOpen: false,
+    a11yTrusted: false,
+    a11yChoice: "pending",
+    a11yError: null,
     boot: async () => {
       try {
         const file = await loadWorkspace();
@@ -132,6 +188,33 @@ export const useShellStore = create<ShellState>((set, get) => {
           ...defaultWorkspace(),
           ready: true,
           loadError: errorText(reason),
+        });
+      }
+      if (!runningInTauri()) {
+        const choice = savedBrowserChoice();
+        set({
+          a11yReady: true,
+          a11yChoice: choice,
+          a11yTrusted: false,
+          a11yOpen: choice === "pending",
+          a11yError: null,
+        });
+        return;
+      }
+      try {
+        const status = await a11yStatus();
+        set({
+          a11yReady: true,
+          a11yChoice: status.choice,
+          a11yTrusted: status.trusted,
+          a11yOpen: status.choice === "pending",
+          a11yError: null,
+        });
+      } catch (reason: unknown) {
+        set({
+          a11yReady: true,
+          a11yOpen: true,
+          a11yError: errorText(reason),
         });
       }
     },
@@ -195,7 +278,7 @@ export const useShellStore = create<ShellState>((set, get) => {
         ...file,
         slots: [null, null, null, null],
       })),
-    addCustomUrl: async (raw) => {
+    addCustomUrl: async (raw, displayName) => {
       let url: string;
       try {
         url = normalizeHttpUrl(raw);
@@ -209,7 +292,12 @@ export const useShellStore = create<ShellState>((set, get) => {
         return;
       }
       const id = `custom-${crypto.randomUUID()}`;
-      const name = new URL(url).hostname;
+      const requested = displayName?.trim() ?? "";
+      const name = requested || new URL(url).hostname;
+      if ([...name].length > 80) {
+        set({ loadError: "自定义链接的名称无效" });
+        return;
+      }
       await commit((file) => {
         const slots = [...file.slots];
         slots[file.focusedPane] = id;
@@ -233,5 +321,92 @@ export const useShellStore = create<ShellState>((set, get) => {
       set((state) => ({
         paneNotes: { ...state.paneNotes, [appId]: message },
       })),
+    applyScan: (scan) =>
+      set({
+        detectedApps: scan.apps,
+        services: scan.services,
+        windows: scan.windows,
+        windowNote: scan.windowNote,
+        a11yTrusted: scan.trusted,
+        scanned: true,
+        scanError: null,
+      }),
+    setScanError: (message) => set({ scanError: message }),
+    designate: (window) =>
+      set((state) => {
+        if (state.designated.some((item) => item.windowId === window.windowId)) {
+          return state;
+        }
+        return { designated: [...state.designated, window] };
+      }),
+    undesignate: (windowId) =>
+      set((state) => ({
+        designated: state.designated.filter((item) => item.windowId !== windowId),
+      })),
+    reopenA11y: () => set({ a11yOpen: true }),
+    hideA11y: () => set({ a11yOpen: false }),
+    requestA11y: async () => {
+      if (!runningInTauri()) {
+        set({ a11yError: "系统授权要在 macOS 应用里发起。网页工作台可以继续使用。" });
+        return;
+      }
+      try {
+        const status = await a11yRequest();
+        set({ a11yTrusted: status.trusted, a11yChoice: status.choice, a11yError: null });
+      } catch (reason: unknown) {
+        set({ a11yError: errorText(reason) });
+      }
+    },
+    openA11ySettings: async () => {
+      if (!runningInTauri()) {
+        set({ a11yError: "系统设置要在 macOS 应用里打开。网页工作台可以继续使用。" });
+        return;
+      }
+      try {
+        await a11yOpenSettings();
+        set({ a11yError: null });
+      } catch (reason: unknown) {
+        set({ a11yError: errorText(reason) });
+      }
+    },
+    refreshA11y: async () => {
+      if (!runningInTauri()) {
+        set({ a11yError: "辅助功能要在 macOS 应用里检查。网页工作台可以继续使用。" });
+        return;
+      }
+      try {
+        const status = await a11yStatus();
+        set({
+          a11yTrusted: status.trusted,
+          a11yChoice: status.choice,
+          a11yError: null,
+          a11yOpen: status.choice === "pending" ? true : get().a11yOpen,
+        });
+      } catch (reason: unknown) {
+        set({ a11yError: errorText(reason) });
+      }
+    },
+    chooseA11y: async (choice) => {
+      if (!runningInTauri()) {
+        if (choice !== "webOnly") {
+          set({ a11yError: "辅助功能要在 macOS 应用里完成。网页工作台可以继续使用。" });
+          return;
+        }
+        localStorage.setItem(A11Y_KEY, "webOnly");
+        set({ a11yChoice: "webOnly", a11yOpen: false, a11yError: null });
+        return;
+      }
+      try {
+        const status = await a11yChoose(choice);
+        set({
+          a11yTrusted: status.trusted,
+          a11yChoice: status.choice,
+          a11yOpen: status.choice === "pending",
+          a11yError: null,
+        });
+      } catch (reason: unknown) {
+        set({ a11yError: errorText(reason) });
+      }
+    },
   };
 });

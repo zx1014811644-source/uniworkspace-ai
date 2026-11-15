@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { appsByKind, catalog } from "../catalog";
+import { DesktopPanels } from "./DesktopPanels";
 import { errorText, probePartitions, type ProbeReport } from "../partitions";
 import { useShellStore } from "../store";
 import type { CatalogApp } from "../types";
@@ -7,7 +8,6 @@ import { runningInTauri } from "../window";
 import { officialWeb, pendingWeb, visibleCount } from "../workspace";
 
 export function Sidebar() {
-  const nativeApps = appsByKind("native");
   const webApps = appsByKind("web");
   const customApps = useShellStore((state) => state.customApps);
   const inspectedId = useShellStore((state) => state.inspectedId);
@@ -48,16 +48,7 @@ export function Sidebar() {
             </ul>
           )}
         </section>
-        <section>
-          <h2 className="px-2 pb-1 text-[11px] font-medium text-shell-muted">桌面</h2>
-          <ul className="space-y-0.5">
-            {nativeApps.map((app) => (
-              <li key={app.id}>
-                <CatalogRow app={app} />
-              </li>
-            ))}
-          </ul>
-        </section>
+        <DesktopPanels />
         {inspected ? <Inspected app={inspected} /> : null}
       </div>
       <CustomUrlForm />
@@ -137,13 +128,20 @@ function CustomRow({ id, name }: { id: string; name: string }) {
 }
 
 function Inspected({ app }: { app: CatalogApp }) {
-  const text = pendingWeb(app)
-    ? "没有已确认的官方网页入口，所以不会打开 WebView，也不会猜一个地址。这不阻挡其他网页。"
-    : "桌面窗口这一周不吸附。未确认的 Bundle ID 保持空白。";
+  let text =
+    "启动后会在大约 1 秒内标成运行中。这一周只检测和列出，不吸附、不跟随、也不去掉窗口边框。";
+  if (pendingWeb(app)) {
+    text = "没有已确认的官方网页入口，所以不会打开 WebView，也不会猜一个地址。这不阻挡其他网页。";
+  } else if (app.kind === "native" && app.bundleIdStatus === "pending") {
+    text = "Bundle ID 还没有核对，不会把它当成已检测到的桌面应用，也不会猜一个标识。";
+  }
 
   return (
     <div className="mx-2 rounded-md border border-shell-line bg-white px-3 py-2">
       <p className="text-sm font-medium">{app.name}</p>
+      {app.kind === "native" && app.bundleId ? (
+        <p className="mt-1 break-all text-[11px] text-shell-muted">{app.bundleId}</p>
+      ) : null}
       <p className="mt-1 text-[11px] leading-5 text-shell-muted">{text}</p>
     </div>
   );

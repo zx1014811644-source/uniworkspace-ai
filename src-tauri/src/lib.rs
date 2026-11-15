@@ -24,6 +24,11 @@ pub fn run() {
             partition::focus_partition,
             partition::hide_partitions,
             partition::probe_partitions,
+            detector::desktop_scan,
+            detector::a11y_status,
+            detector::a11y_request,
+            detector::a11y_open_settings,
+            detector::a11y_choose,
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {
