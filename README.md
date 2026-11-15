@@ -29,7 +29,7 @@ pnpm tauri dev
 pnpm tauri build --debug --bundles app --no-sign
 ```
 
-产物是未签名的 debug `.app`。工作流里没有 Windows 或 Linux 任务。
+产物是未签名的 debug `.app`。CI 先用 `ditto` 把它打成 zip 再上传，这样下载解压后主程序仍保留可执行权限。工作流里没有 Windows 或 Linux 任务。
 
 ## 应用目录
 

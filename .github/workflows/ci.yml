@@ -67,9 +67,24 @@ jobs:
             exit 1
           fi
 
+      - name: Archive the unsigned app
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target/debug/bundle/macos -name '*.app' -type d -print -quit)
+          ditto -c -k --keepParent "${APP}" uniworkspace-ai-macos-debug.zip
+          mode=$(zipinfo uniworkspace-ai-macos-debug.zip | awk '/Contents\/MacOS\// { print $1; exit }')
+          echo "Main executable mode in archive: ${mode}"
+          case "${mode}" in
+            -??x*) ;;
+            *)
+              echo "Archive lost the executable bit on the app binary"
+              exit 1
+              ;;
+          esac
+
       - name: Upload unsigned debug app
         uses: actions/upload-artifact@v4
         with:
           name: uniworkspace-ai-macos-debug
-          path: src-tauri/target/debug/bundle/macos/
+          path: uniworkspace-ai-macos-debug.zip
           if-no-files-found: error
