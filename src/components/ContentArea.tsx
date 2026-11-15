@@ -1,171 +1,225 @@
-import { useLayoutEffect, useRef, useState } from "react";
-import { catalog } from "../catalog";
-import {
-  errorText,
-  hidePartitions,
-  isWeek2Web,
-  setPartitionBounds,
-  showPartition,
-} from "../partitions";
+import { useLayoutEffect, useRef } from "react";
+import { errorText, syncPanes, type PaneSpec } from "../partitions";
 import { useShellStore } from "../store";
-import type { CatalogApp } from "../types";
 import { runningInTauri } from "../window";
+import { embedTarget, visibleCount, type LayoutMode } from "../workspace";
 
 export function ContentArea() {
-  const selectedId = useShellStore((state) => state.selectedId);
-  const selected = catalog.apps.find((app) => app.id === selectedId) ?? null;
+  const ready = useShellStore((state) => state.ready);
 
   return (
-    <main className="relative min-w-0 flex-1 overflow-hidden bg-shell-canvas">
-      {selected && isWeek2Web(selected) ? (
-        <PartitionHost app={selected} />
-      ) : selected ? (
-        <SelectedApp />
-      ) : (
-        <EmptyState />
-      )}
+    <main className="flex min-w-0 flex-1 flex-col bg-shell-canvas">
+      {ready ? <PaneGrid /> : <LoadingState />}
     </main>
   );
 }
 
-function EmptyState() {
+function LoadingState() {
   return (
-    <div className="flex h-full items-center justify-center px-10">
-      <div className="max-w-md text-center">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-shell-accent">
-          内容区
-        </p>
-        <h1 className="mt-3 text-2xl font-semibold tracking-tight">选择一个应用</h1>
-        <p className="mt-3 text-sm leading-6 text-shell-muted">
-          ChatGPT、Claude、Gemini 和 Kimi 会在各自的分区里打开。其余应用这一周仍然只标出位置。
-        </p>
-      </div>
+    <div className="flex flex-1 items-center justify-center text-sm text-shell-muted">
+      正在恢复上次的布局…
     </div>
   );
 }
 
-function SelectedApp() {
-  const selectedId = useShellStore((state) => state.selectedId);
-  const app = catalog.apps.find((entry) => entry.id === selectedId);
-  if (!app) {
-    return <EmptyState />;
-  }
-
-  const status =
-    app.kind === "web"
-      ? app.webStatus === "official"
-        ? "已记录官方网址，这一周还不会在这里打开"
-        : "官方网址仍待确认"
-      : app.bundleIdStatus === "confirmed"
-        ? "已记录 Bundle ID，尚未附着窗口"
-        : "Bundle ID 仍待确认";
-
-  return (
-    <div className="flex h-full items-center justify-center px-10">
-      <div className="w-full max-w-lg rounded-2xl border border-shell-line bg-white px-8 py-7 shadow-sm">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-shell-accent">
-          {app.kind === "web" ? "网页" : "桌面"}
-        </p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">{app.name}</h1>
-        <p className="mt-3 text-sm leading-6 text-shell-muted">{status}</p>
-      </div>
-    </div>
-  );
-}
-
-function PartitionHost({ app }: { app: CatalogApp & { webUrl: string } }) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const [error, setError] = useState<string | null>(null);
+function PaneGrid() {
+  const layout = useShellStore((state) => state.layout);
+  const slots = useShellStore((state) => state.slots);
+  const customApps = useShellStore((state) => state.customApps);
+  const focusedPane = useShellStore((state) => state.focusedPane);
+  const syncError = useShellStore((state) => state.syncError);
+  const setSyncError = useShellStore((state) => state.setSyncError);
+  const hosts = useRef<(HTMLDivElement | null)[]>([]);
+  const count = visibleCount(layout);
 
   useLayoutEffect(() => {
     if (!runningInTauri()) {
       return;
     }
-    const host = hostRef.current;
-    if (!host) {
-      return;
-    }
-    let cancelled = false;
-    let shown = false;
-    let lastKey = "";
-
+    let frame = 0;
     const publish = () => {
-      if (cancelled) {
-        return;
-      }
-      const rect = host.getBoundingClientRect();
-      if (rect.width < 2 || rect.height < 2) {
-        return;
-      }
-      const key = [
-        rect.x.toFixed(1),
-        rect.y.toFixed(1),
-        rect.width.toFixed(1),
-        rect.height.toFixed(1),
-      ].join(":");
-      if (key === lastKey) {
-        return;
-      }
-      lastKey = key;
-      const bounds = {
-        appId: app.id,
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-      };
-      if (!shown) {
-        shown = true;
-        void showPartition({ ...bounds, url: app.webUrl }).catch((reason: unknown) => {
-          if (!cancelled) {
-            setError(errorText(reason));
-          }
+      const state = useShellStore.getState();
+      const visible = visibleCount(state.layout);
+      const panes: PaneSpec[] = [];
+      for (let index = 0; index < visible; index += 1) {
+        const appId = state.slots[index];
+        const host = hosts.current[index];
+        if (!appId || !host) {
+          continue;
+        }
+        const target = embedTarget(appId, state.customApps);
+        if (!target) {
+          continue;
+        }
+        const rect = host.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) {
+          continue;
+        }
+        panes.push({
+          appId,
+          url: target.url,
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+          focus: index === state.focusedPane,
         });
-        return;
       }
-      void setPartitionBounds(bounds);
+      void syncPanes(panes)
+        .then(() => {
+          setSyncError(null);
+        })
+        .catch((reason: unknown) => {
+          setSyncError(errorText(reason));
+        });
     };
-
-    publish();
-    const observer = new ResizeObserver(() => publish());
-    observer.observe(host);
-    window.addEventListener("resize", publish);
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(publish);
+    };
+    schedule();
+    const observer = new ResizeObserver(() => {
+      schedule();
+    });
+    for (let index = 0; index < count; index += 1) {
+      const host = hosts.current[index];
+      if (host) {
+        observer.observe(host);
+      }
+    }
+    window.addEventListener("resize", schedule);
     return () => {
-      cancelled = true;
+      cancelAnimationFrame(frame);
       observer.disconnect();
-      window.removeEventListener("resize", publish);
-      void hidePartitions();
+      window.removeEventListener("resize", schedule);
     };
-  }, [app.id, app.webUrl]);
+  }, [count, customApps, focusedPane, layout, setSyncError, slots]);
 
-  if (!runningInTauri()) {
-    return (
-      <div className="flex h-full items-center justify-center px-10">
-        <div className="w-full max-w-lg rounded-2xl border border-shell-line bg-white px-8 py-7 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-shell-accent">
-            网页
-          </p>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight">{app.name}</h1>
-          <p className="mt-3 text-sm leading-6 text-shell-muted">
-            浏览器预览里没有分区 WebView。在 Mac 上运行 <code>pnpm tauri dev</code> 后，这里会打开{" "}
-            {app.webUrl}
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const gridClass =
+    layout === "single"
+      ? "grid-cols-1 grid-rows-1"
+      : layout === "split"
+        ? "grid-cols-2 grid-rows-1"
+        : "grid-cols-2 grid-rows-2";
 
   return (
-    <div ref={hostRef} className="flex h-full items-center justify-center px-10">
-      <div className="max-w-md text-center">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-shell-accent">
-          独立分区
-        </p>
-        <h1 className="mt-3 text-2xl font-semibold tracking-tight">{app.name}</h1>
-        <p className="mt-3 text-sm leading-6 text-shell-muted">
-          {error ?? "分区页面盖在这块区域上。登录窗口会单独弹出，并使用同一个分区。"}
-        </p>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-shell-line px-3">
+        <LayoutButton mode="single" label="单窗" />
+        <LayoutButton mode="split" label="1:1" />
+        <LayoutButton mode="grid" label="田字格" />
+        <ClearButton />
+      </div>
+      {syncError ? (
+        <p className="shrink-0 px-3 py-2 text-xs leading-5 text-[#8a3d32]">{syncError}</p>
+      ) : null}
+      <div className={`grid min-h-0 flex-1 gap-2 p-2 ${gridClass}`}>
+        {Array.from({ length: count }, (_, index) => (
+          <Pane
+            key={`${layout}-${index}`}
+            index={index}
+            hostRef={(element) => {
+              hosts.current[index] = element;
+            }}
+          />
+        ))}
       </div>
     </div>
+  );
+}
+
+function LayoutButton({ mode, label }: { mode: LayoutMode; label: string }) {
+  const layout = useShellStore((state) => state.layout);
+  const setLayout = useShellStore((state) => state.setLayout);
+  const active = layout === mode;
+
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      className={`rounded-md px-2.5 py-1 text-xs ${
+        active
+          ? "bg-white text-shell-ink shadow-sm"
+          : "text-shell-muted hover:bg-black/5 hover:text-shell-ink"
+      }`}
+      onClick={() => {
+        void setLayout(mode);
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function ClearButton() {
+  const clearAllPanes = useShellStore((state) => state.clearAllPanes);
+  return (
+    <button
+      type="button"
+      className="ml-auto rounded-md px-2 py-1 text-xs text-shell-muted hover:bg-black/5 hover:text-shell-ink"
+      onClick={() => {
+        void clearAllPanes();
+      }}
+    >
+      清空分屏
+    </button>
+  );
+}
+
+function Pane({
+  index,
+  hostRef,
+}: {
+  index: number;
+  hostRef: (element: HTMLDivElement | null) => void;
+}) {
+  const appId = useShellStore((state) => state.slots[index] ?? null);
+  const customApps = useShellStore((state) => state.customApps);
+  const focused = useShellStore((state) => state.focusedPane === index);
+  const note = useShellStore((state) => (appId ? state.paneNotes[appId] : undefined));
+  const focusPane = useShellStore((state) => state.focusPane);
+  const clearPane = useShellStore((state) => state.clearPane);
+  const target = appId ? embedTarget(appId, customApps) : null;
+
+  return (
+    <section
+      className={`flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border bg-white ${
+        focused ? "border-shell-accent" : "border-shell-line"
+      }`}
+      onMouseDown={() => {
+        void focusPane(index);
+      }}
+    >
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-shell-line px-2">
+        <span className="truncate text-xs font-medium">{target?.name ?? "空格"}</span>
+        {note ? <span className="truncate text-[11px] text-shell-accent">{note}</span> : null}
+        {appId ? (
+          <button
+            type="button"
+            className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-shell-muted hover:bg-black/5 hover:text-shell-ink"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => {
+              void clearPane(index);
+            }}
+          >
+            移出
+          </button>
+        ) : null}
+      </div>
+      <div
+        ref={hostRef}
+        className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm leading-6 text-shell-muted"
+      >
+        {target ? (
+          runningInTauri() ? (
+            "正在打开这一格的分区。"
+          ) : (
+            `${target.url}。浏览器预览不会加载这个页面。`
+          )
+        ) : (
+          "从侧栏把已确认的网页放进这一格。"
+        )}
+      </div>
+    </section>
   );
 }

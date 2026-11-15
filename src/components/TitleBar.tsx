@@ -1,4 +1,3 @@
-import { useShellStore } from "../store";
 import {
   closeWindow,
   minimizeWindow,
@@ -6,8 +5,6 @@ import {
 } from "../window";
 
 export function TitleBar() {
-  const select = useShellStore((state) => state.select);
-
   return (
     <header
       className="flex h-11 shrink-0 items-center gap-3 border-b border-shell-line bg-shell-bar px-3"
@@ -44,14 +41,6 @@ export function TitleBar() {
           UniWorkspace
         </p>
       </div>
-      <button
-        type="button"
-        className="rounded-md px-2 py-1 text-xs text-shell-muted hover:bg-black/5 hover:text-shell-ink"
-        onMouseDown={(event) => event.stopPropagation()}
-        onClick={() => select(null)}
-      >
-        清空选择
-      </button>
     </header>
   );
 }

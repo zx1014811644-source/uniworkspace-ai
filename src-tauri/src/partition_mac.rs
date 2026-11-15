@@ -5,6 +5,7 @@
 //! directories on `_WKWebsiteDataStoreConfiguration` instead. Neither path uses
 //! `nonPersistent` storage.
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -12,26 +13,51 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{msg_send, ClassType, MainThreadMarker};
 use objc2_foundation::{NSProcessInfo, NSString, NSURL};
 use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
+use serde::Serialize;
 use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
+};
 use url::Url;
 
 use crate::partition::{
-    backend_detail, backend_name, identifier_string, isolation_failure, parse_marker,
-    partition_identifier, require_week2_site, site_by_id, site_label, storage_hint,
-    store_kind_for_major, PartitionStoreKind, ProbeReport, ProbeSample, WEEK2_SITES,
+    authorize_panes, backend_detail, backend_name, default_workspace, identifier_string,
+    isolation_failure, official_site, parse_marker, partition_identifier, plan_pane_crash,
+    read_workspace, site_label, storage_hint, store_kind_for_major, OpenPane, PaneSpec,
+    PartitionStoreKind, ProbeReport, ProbeSample, RebuildGate, OFFICIAL_SITES,
 };
 
 static OAUTH_SEQ: AtomicU64 = AtomicU64::new(1);
 static PROBE_SEQ: AtomicU64 = AtomicU64::new(1);
 static PROBE_BUSY: AtomicBool = AtomicBool::new(false);
+static PANES: Mutex<HashMap<String, LivePane>> = Mutex::new(HashMap::new());
+static GATES: Mutex<HashMap<String, RebuildGate>> = Mutex::new(HashMap::new());
+static FOCUSED_LABEL: Mutex<String> = Mutex::new(String::new());
+
+#[derive(Clone)]
+struct LivePane {
+    app_id: String,
+    url: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    visible: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PaneNotice {
+    app_id: String,
+    message: String,
+}
 
 const POPUP_CLOSE_SCRIPT: &str = r#"
 (() => {
@@ -41,71 +67,261 @@ const POPUP_CLOSE_SCRIPT: &str = r#"
 })();
 "#;
 
-pub fn show_partition(
-    app: AppHandle,
-    app_id: String,
-    url: String,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+pub fn sync_panes(app: AppHandle, panes: Vec<PaneSpec>) -> Result<(), String> {
+    let workspace = read_workspace(&app)?;
+    let opened = authorize_panes(&panes, &workspace)?;
+    let kind = current_store_kind()?;
+    let mut errors = Vec::new();
+    let mut visible_labels = Vec::new();
+    for pane in &opened {
+        let label = site_label(&pane.app_id);
+        visible_labels.push(label);
+        if let Err(err) = ensure_visible(&app, pane, kind) {
+            errors.push(err);
+        }
+    }
+    hide_unlisted(&app, &visible_labels)?;
+    write_partition_index(&app);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
+pub fn focus_partition(app: &AppHandle, app_id: &str) -> Result<(), String> {
+    let label = site_label(app_id);
+    let Some(webview) = app.get_webview(&label) else {
+        return Ok(());
+    };
+    webview.show().map_err(|err| err.to_string())?;
+    focus_once(&webview, &label)
+}
+
+pub fn hide_partitions(app: &AppHandle) -> Result<(), String> {
+    hide_unlisted(app, &[])
+}
+
+pub fn handle_content_process_terminated(webview: &tauri::Webview) {
+    let label = webview.label().to_string();
+    if !label.starts_with("partition-") {
+        let _ = webview.reload();
+        return;
+    }
+    let app = webview.app_handle().clone();
+    std::thread::spawn(move || {
+        let app_for_task = app.clone();
+        let _ = app.run_on_main_thread(move || rebuild_crashed_pane(&app_for_task, &label));
+    });
+}
+
+fn ensure_visible(
+    app: &AppHandle,
+    pane: &OpenPane,
+    kind: PartitionStoreKind,
 ) -> Result<(), String> {
-    let site = require_week2_site(&app_id, &url)?;
-    if width < 2.0 || height < 2.0 {
-        return Ok(());
+    let label = site_label(&pane.app_id);
+    {
+        let mut panes = lock_panes();
+        panes.insert(
+            label.clone(),
+            LivePane {
+                app_id: pane.app_id.clone(),
+                url: pane.url.clone(),
+                x: pane.x,
+                y: pane.y,
+                width: pane.width,
+                height: pane.height,
+                visible: true,
+            },
+        );
     }
-    hide_except(&app, Some(site.id))?;
-    let label = site_label(site.id);
     if let Some(webview) = app.get_webview(&label) {
-        place(&webview, x, y, width, height)?;
+        place(&webview, pane.x, pane.y, pane.width, pane.height)?;
         webview.show().map_err(|err| err.to_string())?;
-        webview.set_focus().map_err(|err| err.to_string())?;
+        if pane.focus {
+            focus_once(&webview, &label)?;
+        }
         return Ok(());
     }
+    create_child(app, &label, pane, kind)?;
+    if pane.focus {
+        if let Some(webview) = app.get_webview(&label) {
+            focus_once(&webview, &label)?;
+        }
+    }
+    Ok(())
+}
+
+fn create_child(
+    app: &AppHandle,
+    label: &str,
+    pane: &OpenPane,
+    kind: PartitionStoreKind,
+) -> Result<(), String> {
     let window = app
         .get_window("main")
         .ok_or_else(|| "找不到主窗口".to_string())?;
-    let parsed = Url::parse(site.url).map_err(|err| err.to_string())?;
-    let kind = current_store_kind()?;
-    let mut builder = WebviewBuilder::new(label.as_str(), WebviewUrl::External(parsed));
-    builder = isolated_builder(builder, &app, site.id, kind)?;
+    let parsed = Url::parse(&pane.url).map_err(|err| err.to_string())?;
+    let mut builder = WebviewBuilder::new(label, WebviewUrl::External(parsed));
+    builder = isolated_builder(builder, app, &pane.app_id, kind)?;
     let popup_app = app.clone();
-    let parent = label.clone();
+    let parent = label.to_string();
     builder = builder
-        .focused(true)
+        .focused(false)
         .on_new_window(move |target, features| {
             open_oauth_window(&popup_app, &parent, target, features)
         });
     window
         .add_child(
             builder,
-            LogicalPosition::new(x, y),
-            LogicalSize::new(width, height),
+            LogicalPosition::new(pane.x, pane.y),
+            LogicalSize::new(pane.width, pane.height),
         )
         .map_err(|err| err.to_string())?;
-    remember_partitions(&app, kind);
     Ok(())
 }
 
-pub fn set_partition_bounds(
-    app: AppHandle,
-    app_id: String,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-) -> Result<(), String> {
-    if site_by_id(&app_id).is_none() || width < 2.0 || height < 2.0 {
-        return Ok(());
+fn rebuild_crashed_pane(app: &AppHandle, crashed_label: &str) {
+    let open_labels: Vec<String> = lock_panes().keys().cloned().collect();
+    let plan = plan_pane_crash(crashed_label, &open_labels);
+    if plan.rebuild != vec![crashed_label.to_string()] {
+        return;
     }
-    let Some(webview) = app.get_webview(&site_label(&app_id)) else {
-        return Ok(());
+    let Some(runtime) = lock_panes().get(crashed_label).cloned() else {
+        return;
     };
-    place(&webview, x, y, width, height)
+    if !allow_rebuild(crashed_label) {
+        let _ = close_label(app, crashed_label);
+        emit_pane(
+            app,
+            "pane-rebuild-failed",
+            &runtime.app_id,
+            "这一格连续崩溃，已停止重建。再从侧栏点一次可以重试。",
+        );
+        return;
+    }
+    let _ = close_label(app, crashed_label);
+    if app.get_webview(crashed_label).is_some() {
+        if let Some(webview) = app.get_webview(crashed_label) {
+            if webview.reload().is_ok() {
+                emit_pane(
+                    app,
+                    "pane-rebuilt",
+                    &runtime.app_id,
+                    "这一格的页面已重新载入，其他格子没有动。",
+                );
+                return;
+            }
+        }
+        emit_pane(
+            app,
+            "pane-rebuild-failed",
+            &runtime.app_id,
+            "这一格崩溃后没能重建。",
+        );
+        return;
+    }
+    let kind = match current_store_kind() {
+        Ok(kind) => kind,
+        Err(message) => {
+            emit_pane(app, "pane-rebuild-failed", &runtime.app_id, &message);
+            return;
+        }
+    };
+    let pane = OpenPane {
+        app_id: runtime.app_id.clone(),
+        url: runtime.url.clone(),
+        x: runtime.x,
+        y: runtime.y,
+        width: runtime.width,
+        height: runtime.height,
+        focus: false,
+    };
+    if let Err(message) = create_child(app, crashed_label, &pane, kind) {
+        emit_pane(app, "pane-rebuild-failed", &runtime.app_id, &message);
+        return;
+    }
+    if !runtime.visible {
+        if let Some(webview) = app.get_webview(crashed_label) {
+            let _ = webview.hide();
+        }
+    }
+    emit_pane(
+        app,
+        "pane-rebuilt",
+        &runtime.app_id,
+        "这一格已按原来的分区重新打开，其他格子没有动。",
+    );
 }
 
-pub fn hide_partitions(app: &AppHandle) -> Result<(), String> {
-    hide_except(app, None)
+fn hide_unlisted(app: &AppHandle, keep: &[String]) -> Result<(), String> {
+    let workspace = read_workspace(app).unwrap_or_else(|_| default_workspace());
+    let labels: Vec<String> = lock_panes().keys().cloned().collect();
+    for label in labels {
+        if keep.iter().any(|item| item == &label) {
+            continue;
+        }
+        let app_id = lock_panes().get(&label).map(|pane| pane.app_id.clone());
+        let known = app_id.as_deref().is_some_and(|id| {
+            official_site(id).is_some() || workspace.custom_apps.iter().any(|item| item.id == id)
+        });
+        if !known {
+            let _ = close_label(app, &label);
+            lock_panes().remove(&label);
+            continue;
+        }
+        if let Some(webview) = app.get_webview(&label) {
+            webview.hide().map_err(|err| err.to_string())?;
+        }
+        if let Some(pane) = lock_panes().get_mut(&label) {
+            pane.visible = false;
+        }
+    }
+    Ok(())
+}
+
+fn close_label(app: &AppHandle, label: &str) -> Result<(), String> {
+    let Some(webview) = app.get_webview(label) else {
+        return Ok(());
+    };
+    webview.close().map_err(|err| err.to_string())
+}
+
+fn focus_once(webview: &tauri::Webview, label: &str) -> Result<(), String> {
+    let mut focused = FOCUSED_LABEL.lock().unwrap_or_else(|err| err.into_inner());
+    if *focused == label {
+        return Ok(());
+    }
+    webview.set_focus().map_err(|err| err.to_string())?;
+    *focused = label.to_string();
+    Ok(())
+}
+
+fn allow_rebuild(label: &str) -> bool {
+    let mut gates = GATES.lock().unwrap_or_else(|err| err.into_inner());
+    let gate = gates
+        .entry(label.to_string())
+        .or_insert_with(|| RebuildGate::new(3, 10_000));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    gate.allow(now)
+}
+
+fn emit_pane(app: &AppHandle, event: &str, app_id: &str, message: &str) {
+    let _ = app.emit(
+        event,
+        PaneNotice {
+            app_id: app_id.to_string(),
+            message: message.to_string(),
+        },
+    );
+}
+
+fn lock_panes() -> std::sync::MutexGuard<'static, HashMap<String, LivePane>> {
+    PANES.lock().unwrap_or_else(|err| err.into_inner())
 }
 
 pub async fn probe_partitions(app: AppHandle) -> Result<ProbeReport, String> {
@@ -161,7 +377,7 @@ fn assemble_probe(
         }
     };
     let seq = PROBE_SEQ.fetch_add(1, Ordering::Relaxed);
-    let labels: Vec<String> = WEEK2_SITES
+    let labels: Vec<String> = OFFICIAL_SITES
         .iter()
         .map(|site| format!("probe-{seq}-{}", site.id))
         .collect();
@@ -172,7 +388,7 @@ fn assemble_probe(
         labels: labels.clone(),
         stop_server: server.stop.clone(),
         backend: backend_detail(kind).to_string(),
-        hints: WEEK2_SITES
+        hints: OFFICIAL_SITES
             .iter()
             .map(|site| format!("{}  {}", site.id, storage_hint(kind, site.id)))
             .collect(),
@@ -180,7 +396,7 @@ fn assemble_probe(
         writes_started: AtomicBool::new(false),
     });
 
-    for (index, site) in WEEK2_SITES.iter().enumerate() {
+    for (index, site) in OFFICIAL_SITES.iter().enumerate() {
         let label = labels[index].clone();
         let loaded = probe.clone();
         let loaded_label = label.clone();
@@ -217,7 +433,7 @@ fn assemble_probe(
 
     let timeout = probe.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(20));
+        std::thread::sleep(Duration::from_secs(30));
         timeout.fail("隔离检查超时。本机需要允许应用访问 127.0.0.1。".into());
     });
     Ok(())
@@ -300,11 +516,11 @@ impl LiveProbe {
     }
 
     fn write_marker(self: Arc<Self>, index: usize) {
-        if index >= WEEK2_SITES.len() {
+        if index >= OFFICIAL_SITES.len() {
             self.read_marker(0);
             return;
         }
-        let app_id = WEEK2_SITES[index].id;
+        let app_id = OFFICIAL_SITES[index].id;
         let label = self.labels[index].clone();
         let Some(webview) = self.app.get_webview(&label) else {
             self.fail(format!("探测页 {label} 已关闭"));
@@ -326,11 +542,11 @@ impl LiveProbe {
     }
 
     fn read_marker(self: Arc<Self>, index: usize) {
-        if index >= WEEK2_SITES.len() {
+        if index >= OFFICIAL_SITES.len() {
             self.complete();
             return;
         }
-        let site = &WEEK2_SITES[index];
+        let site = &OFFICIAL_SITES[index];
         let label = self.labels[index].clone();
         let Some(webview) = self.app.get_webview(&label) else {
             self.fail(format!("探测页 {label} 已关闭"));
@@ -376,7 +592,8 @@ impl LiveProbe {
             isolated: failure.is_none(),
             backend: self.backend.clone(),
             detail: failure.unwrap_or_else(|| {
-                "四个分区在同一来源上写入了不同的 cookie 和 localStorage，互相读不到。".into()
+                "已确认的网页分区在同一来源上写入了不同的 cookie 和 localStorage，互相读不到。"
+                    .into()
             }),
             hints: self.hints.clone(),
             samples,
@@ -453,18 +670,6 @@ fn open_oauth_window(
             NewWindowResponse::Deny
         }
     }
-}
-
-fn hide_except(app: &AppHandle, keep: Option<&str>) -> Result<(), String> {
-    for site in WEEK2_SITES {
-        if Some(site.id) == keep {
-            continue;
-        }
-        if let Some(webview) = app.get_webview(&site_label(site.id)) {
-            webview.hide().map_err(|err| err.to_string())?;
-        }
-    }
-    Ok(())
 }
 
 fn place(webview: &tauri::Webview, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
@@ -666,7 +871,13 @@ fn spi_store(config: &AnyObject) -> Result<Retained<WKWebsiteDataStore>, String>
         .ok_or_else(|| "macOS 13 无法按目录创建持久 WKWebsiteDataStore".into())
 }
 
-fn remember_partitions(app: &AppHandle, kind: PartitionStoreKind) {
+pub fn write_partition_index(app: &AppHandle) {
+    let Ok(kind) = current_store_kind() else {
+        return;
+    };
+    let Ok(workspace) = read_workspace(app) else {
+        return;
+    };
     let Ok(root) = app.path().app_data_dir() else {
         return;
     };
@@ -674,22 +885,27 @@ fn remember_partitions(app: &AppHandle, kind: PartitionStoreKind) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let entries: Vec<_> = WEEK2_SITES
-        .iter()
-        .map(|site| {
-            serde_json::json!({
-                "appId": site.id,
-                "url": site.url,
-                "identifier": identifier_string(site.id),
-                "persistent": true,
-                "inMemory": false,
-                "backend": backend_name(kind),
-                "hint": storage_hint(kind, site.id),
-            })
-        })
-        .collect();
+    let mut entries = Vec::new();
+    for site in OFFICIAL_SITES {
+        entries.push(index_entry(site.id, site.url, kind));
+    }
+    for custom in &workspace.custom_apps {
+        entries.push(index_entry(&custom.id, &custom.url, kind));
+    }
     let Ok(body) = serde_json::to_string_pretty(&entries) else {
         return;
     };
     let _ = std::fs::write(dir.join("index.json"), body);
+}
+
+fn index_entry(app_id: &str, url: &str, kind: PartitionStoreKind) -> serde_json::Value {
+    serde_json::json!({
+        "appId": app_id,
+        "url": url,
+        "identifier": identifier_string(app_id),
+        "persistent": true,
+        "inMemory": false,
+        "backend": backend_name(kind),
+        "hint": storage_hint(kind, app_id),
+    })
 }

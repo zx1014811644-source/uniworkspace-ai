@@ -28,12 +28,18 @@ const nativeIds = [
   "accio-work-desktop",
 ];
 
-const week2Urls = {
+const officialUrls = {
   chatgpt: "https://chatgpt.com/",
   claude: "https://claude.ai/",
   gemini: "https://gemini.google.com/",
   kimi: "https://www.kimi.com/",
+  doubao: "https://www.doubao.com/chat/",
+  workbuddy: "https://www.workbuddy.cn/app",
+  deepseek: "https://chat.deepseek.com/",
 };
+
+const pendingWebIds = ["accio-work", "cursor", "harness"];
+const pendingBundleIds = ["workbuddy-desktop", "harness-desktop", "accio-work-desktop"];
 
 const webStatuses = new Set(["official", "pending", "desktopOnly"]);
 const bundleStatuses = new Set(["confirmed", "pending", "not-applicable"]);
@@ -88,10 +94,33 @@ for (const app of catalog.apps ?? []) {
   }
 }
 
-for (const [id, url] of Object.entries(week2Urls)) {
+for (const [id, url] of Object.entries(officialUrls)) {
   const app = catalog.apps.find((entry) => entry.id === id);
-  if (!app) fail(`missing week 2 app ${id}`);
+  if (!app) fail(`missing official web app ${id}`);
   else if (app.webUrl !== url) fail(`${id} webUrl must stay ${url}`);
+  else if (app.webStatus !== "official") fail(`${id} must stay official`);
+}
+
+for (const id of pendingWebIds) {
+  const app = catalog.apps.find((entry) => entry.id === id);
+  if (!app) fail(`missing pending web app ${id}`);
+  else if (app.webUrl !== null) fail(`${id} webUrl must stay null`);
+  else if (app.webStatus !== "pending") fail(`${id} must stay pending`);
+  else if (!String(app.notes).includes("does not open a WebView")) {
+    fail(`${id} must say it does not open a WebView`);
+  }
+}
+
+for (const id of pendingBundleIds) {
+  const app = catalog.apps.find((entry) => entry.id === id);
+  if (!app) fail(`missing ${id}`);
+  else if (app.bundleId !== null) fail(`${id} bundleId must stay null`);
+}
+
+const cursorDesktop = catalog.apps.find((entry) => entry.id === "cursor-desktop");
+if (!cursorDesktop) fail("missing cursor-desktop");
+else if (cursorDesktop.bundleId !== "com.todesktop.230313mzl4w4u92") {
+  fail("cursor-desktop bundleId must stay the confirmed value");
 }
 
 for (const id of webIds) {
