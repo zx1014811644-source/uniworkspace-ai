@@ -5,6 +5,7 @@
 //! directories on `_WKWebsiteDataStoreConfiguration` instead. Neither path uses
 //! `nonPersistent` storage.
 
+use std::ffi::CString;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -314,10 +315,11 @@ impl LiveProbe {
         );
         let next = self.clone();
         if let Err(err) = webview.eval_with_callback(script, move |_| {
-            let next = next.clone();
-            let _ = next
+            let step = next.clone();
+            let hop = step.clone();
+            let _ = hop
                 .app
-                .run_on_main_thread(move || next.write_marker(index + 1));
+                .run_on_main_thread(move || step.write_marker(index + 1));
         }) {
             self.fail(format!("无法写入 {app_id} 的标记: {err}"));
         }
@@ -337,14 +339,16 @@ impl LiveProbe {
         let script = r#"(function(){var prefix='uw-partition=';var cookie='';var parts=(document.cookie||'').split('; ');for(var i=0;i<parts.length;i++){if(parts[i].indexOf(prefix)===0){cookie=parts[i].slice(prefix.length);}}return {local:localStorage.getItem('uw-partition')||'',cookie:cookie};})()"#;
         let app_id = site.id.to_string();
         let next = self.clone();
+        let callback_id = app_id.clone();
         if let Err(err) = webview.eval_with_callback(script, move |raw| {
-            let next = next.clone();
-            let app_id = app_id.clone();
-            let _ = next
+            let step = next.clone();
+            let hop = step.clone();
+            let app_id = callback_id;
+            let _ = hop
                 .app
                 .run_on_main_thread(move || match parse_marker(&raw) {
                     Ok((local_storage, cookie)) => {
-                        if let Ok(mut samples) = next.samples.lock() {
+                        if let Ok(mut samples) = step.samples.lock() {
                             samples.push(ProbeSample {
                                 app_id: app_id.clone(),
                                 identifier: identifier_string(&app_id),
@@ -352,9 +356,9 @@ impl LiveProbe {
                                 cookie,
                             });
                         }
-                        next.read_marker(index + 1);
+                        step.read_marker(index + 1);
                     }
-                    Err(message) => next.fail(message),
+                    Err(message) => step.fail(message),
                 });
         }) {
             self.fail(format!("无法读取 {app_id} 的标记: {err}"));
@@ -393,7 +397,8 @@ impl LiveProbe {
         PROBE_BUSY.store(false, Ordering::SeqCst);
         let app = self.app.clone();
         let labels = self.labels.clone();
-        let _ = app.run_on_main_thread(move || {
+        let hop = app.clone();
+        let _ = hop.run_on_main_thread(move || {
             for label in labels {
                 if let Some(webview) = app.get_webview(&label) {
                     let _ = webview.close();
@@ -409,7 +414,7 @@ fn open_oauth_window(
     parent_label: &str,
     url: Url,
     features: tauri::webview::NewWindowFeatures,
-) -> NewWindowResponse {
+) -> NewWindowResponse<tauri::Wry> {
     if !matches!(url.scheme(), "https" | "http" | "about") {
         return NewWindowResponse::Deny;
     }
@@ -525,7 +530,7 @@ fn partition_root(app: &AppHandle, app_id: &str) -> Result<PathBuf, String> {
 }
 
 fn spi_store_configuration(root: &Path) -> Result<Retained<AnyObject>, String> {
-    let class = AnyClass::get("_WKWebsiteDataStoreConfiguration")
+    let class = AnyClass::get(c"_WKWebsiteDataStoreConfiguration")
         .ok_or("系统没有 _WKWebsiteDataStoreConfiguration，不能在 macOS 13 上分开持久分区")?;
     let allocated: *mut AnyObject = unsafe { msg_send![class, alloc] };
     let initialized: *mut AnyObject = unsafe { msg_send![allocated, init] };
@@ -601,7 +606,8 @@ fn assign_optional(
     path: &Path,
     directory: bool,
 ) -> Result<bool, String> {
-    let sel = objc2::runtime::Sel::register(selector);
+    let name = CString::new(selector).map_err(|_| format!("选择子无效: {selector}"))?;
+    let sel = objc2::runtime::Sel::register(&name);
     let responds: bool = unsafe { msg_send![config, respondsToSelector: sel] };
     if !responds {
         return Ok(false);
