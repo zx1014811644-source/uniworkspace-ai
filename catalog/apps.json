@@ -1,0 +1,228 @@
+{
+  "schemaVersion": 1,
+  "platform": "macos",
+  "minimumSystemVersion": "13.0",
+  "researchedAt": "2026-11-15",
+  "apps": [
+    {
+      "id": "chatgpt",
+      "name": "ChatGPT",
+      "kind": "web",
+      "webUrl": "https://chatgpt.com/",
+      "webStatus": "official",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "Official web app. OpenAI's macOS download help and Homebrew cask chatgpt both use https://chatgpt.com/. The desktop client is chatgpt-desktop."
+    },
+    {
+      "id": "claude",
+      "name": "Claude",
+      "kind": "web",
+      "webUrl": "https://claude.ai/",
+      "webStatus": "official",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "Official web chat. Anthropic's help center says to visit claude.ai. The desktop client is claude-desktop."
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini",
+      "kind": "web",
+      "webUrl": "https://gemini.google.com/",
+      "webStatus": "official",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "Official Gemini web app. The desktop client is gemini-desktop."
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "kind": "web",
+      "webUrl": "https://www.kimi.com/",
+      "webStatus": "official",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "Official Moonshot site. The help center says to visit Kimi.com; the Chinese chat UI is served on the same host at /zh. The desktop client is kimi-desktop."
+    },
+    {
+      "id": "doubao",
+      "name": "豆包",
+      "kind": "web",
+      "webUrl": "https://www.doubao.com/chat/",
+      "webStatus": "official",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "Official Doubao chat. This URL is also the homepage of Homebrew cask doubao. The desktop client is doubao-desktop."
+    },
+    {
+      "id": "workbuddy",
+      "name": "WorkBuddy",
+      "kind": "web",
+      "webUrl": "https://www.workbuddy.cn/app",
+      "webStatus": "official",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "Official China web workspace, checked on 2026-11-15. The international edition is https://www.workbuddy.ai/app. The desktop bundle id is still pending on workbuddy-desktop."
+    },
+    {
+      "id": "accio-work",
+      "name": "Accio Work",
+      "kind": "web",
+      "webUrl": null,
+      "webStatus": "pending",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "Official product pages are https://www.accio.com/work/ and https://zh.accio.com/work. Alibaba's quick start says a web version exists, but no stable app URL distinct from those pages was confirmed. The desktop bundle id is also pending on accio-work-desktop."
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "kind": "web",
+      "webUrl": null,
+      "webStatus": "pending",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "No stable official in-browser editor was found. https://cursor.com/ and https://cursor.com/download are the product and download sites. The desktop client is cursor-desktop."
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "kind": "web",
+      "webUrl": "https://chat.deepseek.com/",
+      "webStatus": "official",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "Official DeepSeek chat. The company site is https://www.deepseek.com/. The desktop agent product is catalogued separately as Harness."
+    },
+    {
+      "id": "harness",
+      "name": "Harness",
+      "kind": "web",
+      "webUrl": null,
+      "webStatus": "pending",
+      "bundleId": null,
+      "bundleIdStatus": "not-applicable",
+      "processNames": [],
+      "notes": "DeepSeek Harness (https://www.deepseek.com/harness/). The product page says it runs as a desktop app or a local web UI started from code; no stable hosted web app URL was confirmed. This is not tryharness.ai and not harness.io. The desktop bundle id is pending on harness-desktop."
+    },
+    {
+      "id": "chatgpt-desktop",
+      "name": "ChatGPT Desktop",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": "com.openai.codex",
+      "bundleIdStatus": "confirmed",
+      "processNames": ["ChatGPT"],
+      "notes": "Current ChatGPT.app. Homebrew cask chatgpt quits com.openai.codex, and public Info.plist reports name the same id with CFBundleName ChatGPT. The older native app, now ChatGPT Classic, uses com.openai.chat and is not this entry."
+    },
+    {
+      "id": "claude-desktop",
+      "name": "Claude Desktop",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": "com.anthropic.claudefordesktop",
+      "bundleIdStatus": "confirmed",
+      "processNames": ["Claude", "Claude Helper"],
+      "notes": "Homebrew cask claude quits com.anthropic.claudefordesktop. Installomator lists blocking processes Claude and Claude Helper. Download page: https://claude.com/download."
+    },
+    {
+      "id": "lm-studio",
+      "name": "LM Studio",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": "ai.elementlabs.lmstudio",
+      "bundleIdStatus": "confirmed",
+      "processNames": ["LM Studio"],
+      "notes": "Homebrew cask lm-studio quits ai.elementlabs.lmstudio. Crash reports identify the process as LM Studio. Product site https://lmstudio.ai/ is not a hosted chat app."
+    },
+    {
+      "id": "gemini-desktop",
+      "name": "Gemini Desktop",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": "com.google.GeminiMacOS",
+      "bundleIdStatus": "confirmed",
+      "processNames": ["Gemini"],
+      "notes": "Homebrew cask google-gemini reads com.google.GeminiMacOS from the app plist and quits that id. The cask currently requires Apple Silicon and macOS 15. Process name is the Gemini.app bundle name. Launcher id com.google.GeminiMacOS.launcher is a helper, not recorded as the main process."
+    },
+    {
+      "id": "kimi-desktop",
+      "name": "Kimi Desktop",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": "com.moonshot.kimichat",
+      "bundleIdStatus": "confirmed",
+      "processNames": ["Kimi"],
+      "notes": "Homebrew cask kimi installs Kimi.app and stores preferences and HTTP storage under com.moonshot.kimichat. Process name is the app bundle name."
+    },
+    {
+      "id": "doubao-desktop",
+      "name": "豆包 Desktop",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": "com.bot.pc.doubao",
+      "bundleIdStatus": "confirmed",
+      "processNames": ["Doubao"],
+      "notes": "The app startup log prints bundle id com.bot.pc.doubao. Homebrew cask doubao uses the same id for caches and preferences and installs Doubao.app."
+    },
+    {
+      "id": "workbuddy-desktop",
+      "name": "WorkBuddy Desktop",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": null,
+      "bundleIdStatus": "pending",
+      "processNames": ["WorkBuddy"],
+      "notes": "Homebrew cask workbuddy-cn installs WorkBuddy.app from download.codebuddy.cn and quits com.tencent.workbuddy.mac. Other write-ups report com.workbuddy.workbuddy for the China build and com.workbuddy.workbuddy-ai for the international build. Those ids disagree, so bundleId stays null until checked on a local copy. Process name is the app bundle name."
+    },
+    {
+      "id": "cursor-desktop",
+      "name": "Cursor Desktop",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": "com.todesktop.230313mzl4w4u92",
+      "bundleIdStatus": "confirmed",
+      "processNames": ["Cursor"],
+      "notes": "Cursor staff confirmed CFBundleIdentifier com.todesktop.230313mzl4w4u92 on the official forum and said it will not change. Homebrew cask cursor stores preferences under the same id. Process name is the Cursor.app bundle name."
+    },
+    {
+      "id": "harness-desktop",
+      "name": "Harness Desktop",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": null,
+      "bundleIdStatus": "pending",
+      "processNames": [],
+      "notes": "DeepSeek Harness desktop is linked from https://www.deepseek.com/download/ and https://www.deepseek.com/harness/. A user discussion reports bundle id com.deepseek.dsh and executable name DeepSeek Harness. That report is not vendor documentation, so bundleId and processNames stay empty."
+    },
+    {
+      "id": "accio-work-desktop",
+      "name": "Accio Work Desktop",
+      "kind": "native",
+      "webUrl": null,
+      "webStatus": "desktopOnly",
+      "bundleId": null,
+      "bundleIdStatus": "pending",
+      "processNames": [],
+      "notes": "Accio Work distributes a desktop app from https://www.accio.com/work/. No macOS bundle id or process name was found in vendor docs or Homebrew."
+    }
+  ]
+}
