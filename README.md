@@ -1,10 +1,10 @@
 # UniWorkspace AI
 
-个人使用的本地 macOS AI 工作台。已确认的网页放在可恢复的分屏里，登录态按应用隔开。桌面应用按目录里已经核对的 Bundle ID 检测，也可以手动指定一个可见窗口。Claude Desktop 可以几何吸附到分屏格，并在拆卸时还原。不调用第三方 AI 接口，也不迁移各家客户端里已经登录的数据。
+个人使用的本地 macOS AI 工作台。已确认的网页放在可恢复的分屏里，登录态按应用隔开。桌面应用按目录里已经核对的 Bundle ID 检测，也可以手动指定一个可见窗口。Bundle ID 已确认的桌面应用可以几何吸附到分屏格，并在拆卸时还原。不调用第三方 AI 接口，也不迁移各家客户端里已经登录的数据。
 
 最低系统版本是 macOS 13。
 
-在 Mac 上核对登录、分屏和单个 WebView 崩溃，按 `docs/week3-m1.md`。桌面检测、辅助功能引导、指定窗口和本机端口，按 `docs/week4-detection-a11y.md`。吸附、点击、跟随和拆卸，按 `docs/week5-snap.md`。云端不能代替那次 Mac 点验。
+在 Mac 上核对登录、分屏和单个 WebView 崩溃，按 `docs/week3-m1.md`。桌面检测、辅助功能引导、指定窗口和本机端口，按 `docs/week4-detection-a11y.md`。Claude Desktop 的吸附通路按 `docs/week5-snap.md`。全部已确认桌面端的吸附、全屏、Space 边缘和对方先退出，按 `docs/week6-m2.md`。云端不能代替那次 Mac 点验。
 
 ## 在 Mac 上开发
 
@@ -87,8 +87,8 @@ Tauri 2.12 的 `WebviewBuilder` 还没有单独的崩溃回调，应用级的 `o
 
 辅助功能在第一次使用时说明原因，可以由用户发起系统授权。拒绝之后，网页分屏照常使用，吸附也不会移动窗口。
 
-Claude Desktop（`com.anthropic.claudefordesktop`）可以吸附到当前格子：格子里是透明占位，辅助功能去掉边框并对齐；主窗口移动、缩放和切换空间时它跟着走。拆卸或退出时还原边框和层级。如果系统不允许去掉边框，就改成在主窗口旁边跟随，不做窗口镜像。其余已确认的桌面应用这一周仍只检测。
+Bundle ID 已确认的桌面应用可以吸附到当前格子：ChatGPT Desktop、Claude Desktop、LM Studio、Gemini Desktop、Kimi Desktop、豆包 Desktop 和 Cursor Desktop。格子里是透明占位，辅助功能去掉边框并对齐；主窗口移动、缩放、全屏和切换空间时它跟着走。拆卸、卸下格子、主窗口退出或对方先退出时还原边框和层级，不留下无边框孤窗。如果系统不允许去掉边框，就改成在主窗口旁边跟随，不做窗口镜像。同一时间只吸附一个。没有确认桌面 ID 的应用只走网页。
 
-全局热键和公证还没有做。`shortcuts` 仍是占位。目录里未核对的网址和 Bundle ID 保持为空。
+步骤在 `docs/week6-m2.md`。拖动时允许轻微缝隙。全局热键和公证还没有做。`shortcuts` 仍是占位。目录里未核对的网址和 Bundle ID 保持为空。
 
 本周不包含 Windows、Linux，也不包含给 Accio Work、Cursor、Harness 编造网页地址。
