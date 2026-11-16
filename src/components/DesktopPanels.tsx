@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { appsByKind, catalog } from "../catalog";
 import { comfyOpenUrl, type ListedWindow, type ServiceStatus } from "../desktop";
-import { SNAP_TARGET_ID } from "../snap";
 import { useShellStore } from "../store";
 import { runningInTauri } from "../window";
 
@@ -76,17 +75,17 @@ export function DesktopPanels() {
                   >
                     {app.name}
                   </button>
-                  {app.appId === SNAP_TARGET_ID ? (
-                    <button
-                      type="button"
-                      className="ml-2 shrink-0 text-[10px] text-shell-accent"
-                      onClick={() => {
-                        askSnap();
-                      }}
-                    >
-                      {snap?.appId === app.appId ? "跟随中" : "吸附"}
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    className="ml-2 shrink-0 text-[10px] text-shell-accent"
+                    onClick={() => {
+                      if (snap?.appId !== app.appId) {
+                        askSnap(app.appId);
+                      }
+                    }}
+                  >
+                    {snap?.appId === app.appId ? "跟随中" : "吸附"}
+                  </button>
                   <span className="ml-2 shrink-0 text-[10px] text-shell-accent">运行中</span>
                 </li>
               ))}

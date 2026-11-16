@@ -13,8 +13,9 @@
 use std::cell::RefCell;
 use std::ffi::{c_void, CStr};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, OnceLock};
+use std::time::Duration;
 
 use objc2::encode::{Encode, Encoding};
 use objc2::msg_send;
@@ -25,12 +26,16 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::detector::{self, RawWindow};
 use crate::snap::{
-    after_chrome_and_placeholder, beside_accepted, chrome_removed, embedded_message, frame_usable,
-    idle_status, moved_rejected_message, pick_target_window, placeholder_rect, plan_follow,
-    read_recovery, recovery_may_clear, rejection, rollback_chrome, side_by_side_message,
-    side_by_side_rect, support_dir_for, target_is_above, target_parts, window_behind,
-    write_recovery, AfterChromeMove, ChromeRecord, FollowInput, RecoveryFile, Rect, SnapFrame,
-    SnapMode, SnapStatus, StopReason, FOLLOW_INTERVAL_NS,
+    advance_follow_health, after_chrome_and_placeholder, beside_accepted, chrome_removed,
+    chrome_restore_failed_message, clear_recovery_after_target_gone, confirmed_bundle,
+    embedded_message, follow_display, frame_usable, frame_write, hold_for_fullscreen_exit,
+    host_missing_message, idle_status, minimized_message, moved_rejected_message,
+    pick_target_window, placeholder_rect, plan_follow, read_recovery, recovery_may_clear,
+    rejection, rollback_chrome, should_exit_fullscreen, side_by_side_message, side_by_side_rect,
+    status_for, support_dir_for, target_gone_message, target_is_above, target_parts,
+    unreadable_frame_message, unreadable_window_message, window_behind, write_recovery,
+    AfterChromeMove, ChromeRecord, DisplayLinkPlan, FollowHealth, FollowInput, RecoveryFile, Rect,
+    SnapFrame, SnapMode, SnapStatus, StopReason, WriteOutcome, FOLLOW_EPSILON, FOLLOW_INTERVAL_NS,
 };
 use crate::window_mac;
 
@@ -122,6 +127,9 @@ struct Session {
     app: AppHandle,
     generation: u64,
     mode: SnapMode,
+    app_id: String,
+    name: String,
+    bundle_id: String,
     pid: i32,
     window_id: u32,
     logical: Rect,
@@ -129,6 +137,8 @@ struct Session {
     ax_rejected: bool,
     space_failed: bool,
     attempted_space: Option<u64>,
+    write_failures: u32,
+    fullscreen_waits: u32,
     message: String,
 }
 
@@ -143,6 +153,12 @@ static FRAME_QUEUED: AtomicBool = AtomicBool::new(false);
 static APPLYING: AtomicBool = AtomicBool::new(false);
 static LINK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static TIMER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+/// `u32::MAX` means the link is not bound to one display.
+static LINK_DISPLAY: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Last display a retarget was attempted for. Stops a refused display from
+/// restarting the link on every vsync.
+static LINK_ATTEMPTED: AtomicU32 = AtomicU32::new(u32::MAX);
+const LINK_UNBOUND: u32 = u32::MAX;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -192,6 +208,7 @@ extern "C" {
 #[link(name = "CoreVideo", kind = "framework")]
 extern "C" {
     fn CVDisplayLinkCreateWithActiveCGDisplays(link: *mut *mut c_void) -> i32;
+    fn CVDisplayLinkCreateWithCGDisplay(display: u32, link: *mut *mut c_void) -> i32;
     fn CVDisplayLinkSetOutputCallback(
         link: *mut c_void,
         callback: extern "C" fn(
@@ -231,6 +248,7 @@ extern "C" {
     fn dispatch_source_cancel(source: *mut c_void);
     fn dispatch_release(object: *mut c_void);
     static _dispatch_source_type_timer: u8;
+    fn kill(pid: i32, sig: i32) -> i32;
 }
 
 type GetWindowFn = unsafe extern "C" fn(*mut c_void, *mut u32) -> i32;
@@ -280,8 +298,11 @@ pub(crate) fn detach(app: &AppHandle) -> Result<SnapStatus, String> {
     let app = app.clone();
     let hopped = app.clone();
     on_main(&hopped, move || {
+        let identity = session_identity();
         restore_active(&app, true)?;
-        let mut status = idle_status();
+        let mut status = identity;
+        status.active = false;
+        status.mode = SnapMode::Inactive;
         status.message = Some("已还原边框和层级。".to_string());
         LAST_NOTE.with(|note| note.replace(None));
         Ok(status)
@@ -301,7 +322,8 @@ pub(crate) fn restore_for_exit() {
     GENERATION.fetch_add(1, Ordering::AcqRel);
     let session = SESSION.with(|slot| slot.borrow_mut().take());
     if let Some(session) = session {
-        let restored = apply_saved(&session.original, true);
+        let host = host_window_id(&session.app);
+        let restored = apply_saved(&session.original, true, host);
         if restored {
             if let Ok(dir) = support_dir_for(&session.app) {
                 crate::snap::clear_recovery(&dir);
@@ -346,11 +368,11 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
     if let Some(message) = rejection(&app_id, trusted, pid > 0, window_id != 0) {
         return Err(message);
     }
-    let bundle = target_parts()
-        .map(|(_, _, bundle)| bundle.to_string())
-        .ok_or_else(|| "目录里没有 Claude Desktop。".to_string())?;
-    let host = host_rect(&snapshot.windows, &app)
-        .ok_or_else(|| "找不到主窗口，没有移动 Claude Desktop。".to_string())?;
+    let (_, name, bundle) = target_parts(&app_id)
+        .ok_or_else(|| "这个应用不在已确认的桌面目录里，没有移动它。".to_string())?;
+    let name = name.to_string();
+    let bundle = bundle.to_string();
+    let host = host_rect(&snapshot.windows, &app).ok_or_else(|| host_missing_message(&name))?;
     let local = frame.as_rect();
     let placeholder = placeholder_rect(host, local);
     let display = display_containing(host.x + host.width / 2.0, host.y + host.height / 2.0);
@@ -358,10 +380,10 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
     let originals = with_window(pid, window_id, SIDE_TIMEOUT, |application, window| {
         read_originals(application, window)
     })
-    .ok_or_else(|| "读不到 Claude Desktop 的窗口，没有移动它。".to_string())?;
+    .ok_or_else(|| unreadable_window_message(&name))?;
     let Some(original_frame) = originals.frame else {
         revert_flags(pid, window_id, &originals);
-        return Err("读不到 Claude Desktop 的窗口位置，没有移动它。".into());
+        return Err(unreadable_frame_message(&name));
     };
     let order: Vec<u32> = snapshot
         .windows
@@ -369,7 +391,7 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
         .map(|window| window.window_id)
         .collect();
     let recovery = RecoveryFile {
-        bundle_id: bundle,
+        bundle_id: bundle.clone(),
         pid,
         window_id,
         x: original_frame.x,
@@ -377,10 +399,11 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
         width: original_frame.width,
         height: original_frame.height,
         below_window: window_behind(&order, window_id),
-        space: space_of(window_id),
+        space: spaces_of(window_id).into_iter().next(),
         chrome: originals.chrome.clone(),
         enhanced: originals.enhanced,
         manual: originals.manual,
+        fullscreen: originals.fullscreen,
     };
     let dir = support_dir_for(&app)?;
     if let Err(err) = write_recovery(&dir, &recovery) {
@@ -394,6 +417,9 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
         }
         if originals.manual != Some(true) {
             let _ = set_app_bool(application, "AXManualAccessibility", true);
+        }
+        if should_exit_fullscreen(originals.fullscreen == Some(true)) {
+            let _ = exit_fullscreen(window);
         }
         hide_chrome(window, &originals)
     });
@@ -426,6 +452,9 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
                 let restored = with_window(pid, window_id, SIDE_TIMEOUT, |application, window| {
                     let chrome_ok = restore_records(application, window, &recovery);
                     let frame_ok = set_frame(window, original_frame);
+                    if let Some(fullscreen) = recovery.fullscreen {
+                        let _ = set_fullscreen(window, fullscreen);
+                    }
                     recovery_may_clear(chrome_ok, true, frame_ok)
                 })
                 .unwrap_or(false);
@@ -439,7 +468,7 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
                 return Err(if restored {
                     moved_rejected_message()
                 } else {
-                    "没能还原 Claude Desktop 的边框。下次启动会再试。".into()
+                    chrome_restore_failed_message(&name)
                 });
             }
             SnapMode::SideBySide
@@ -464,6 +493,9 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
             app: app.clone(),
             generation,
             mode,
+            app_id: app_id.clone(),
+            name: name.clone(),
+            bundle_id: bundle.clone(),
             pid,
             window_id,
             logical: local,
@@ -471,6 +503,8 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
             ax_rejected: false,
             space_failed: false,
             attempted_space: None,
+            write_failures: 0,
+            fullscreen_waits: 0,
             message: message.clone(),
         });
     });
@@ -494,6 +528,7 @@ struct Originals {
     chrome: Vec<ChromeRecord>,
     enhanced: Option<bool>,
     manual: Option<bool>,
+    fullscreen: Option<bool>,
     already_borderless: bool,
 }
 
@@ -550,6 +585,7 @@ fn read_originals(application: *mut c_void, window: *mut c_void) -> Originals {
         chrome,
         enhanced,
         manual,
+        fullscreen: read_fullscreen(window),
         already_borderless,
     }
 }
@@ -653,8 +689,8 @@ fn apply_follow() {
 
 fn apply_follow_inner() {
     let gen = GENERATION.load(Ordering::Acquire);
-    let Some((app, mode, pid, window_id, logical, ax_rejected, space_failed)) =
-        SESSION.with(|slot| {
+    let Some((app, mode, pid, window_id, logical, ax_rejected, space_failed, health)) = SESSION
+        .with(|slot| {
             let session = slot.borrow();
             let session = session.as_ref()?;
             if session.generation != gen {
@@ -668,6 +704,10 @@ fn apply_follow_inner() {
                 session.logical,
                 session.ax_rejected,
                 session.space_failed,
+                FollowHealth {
+                    write_failures: session.write_failures,
+                    fullscreen_waits: session.fullscreen_waits,
+                },
             ))
         })
     else {
@@ -683,6 +723,10 @@ fn apply_follow_inner() {
     let Some(host) = host_rect(&windows, &app) else {
         return;
     };
+    ensure_display_link(display_id_containing(
+        host.x + host.width / 2.0,
+        host.y + host.height / 2.0,
+    ));
     sync_placeholder(&app, logical, host.height);
     let host_id = host_window_id(&app);
     let current = bounds_of(&windows, window_id);
@@ -706,11 +750,16 @@ fn apply_follow_inner() {
         local_placeholder: logical,
         current,
         display,
-        host_space: host_id.and_then(space_of),
-        target_space: if alive { space_of(window_id) } else { None },
+        host_spaces: host_id.map(spaces_of).unwrap_or_default(),
+        target_spaces: if alive && process_alive(pid) {
+            spaces_of(window_id)
+        } else {
+            Vec::new()
+        },
         target_above_host: above,
         ax_rejected,
         target_visible: alive,
+        target_process_alive: process_alive(pid),
         minimized,
         space_move_failed: space_failed,
     });
@@ -751,14 +800,46 @@ fn apply_follow_inner() {
         return;
     }
     if let Some(frame) = plan.frame {
-        let wrote = with_window(pid, window_id, FOLLOW_TIMEOUT, |_application, window| {
-            set_frame(window, frame)
+        let outcome = with_window(pid, window_id, FOLLOW_TIMEOUT, |_application, window| {
+            if hold_for_fullscreen_exit(read_fullscreen(window) == Some(true)) {
+                let _ = set_fullscreen(window, false);
+                return WriteOutcome::WaitingForFullscreen;
+            }
+            let write = frame_write(current, frame, FOLLOW_EPSILON);
+            let size_ok = match write.size {
+                Some((width, height)) => set_size(window, width, height),
+                None => true,
+            };
+            let position_ok = match write.position {
+                Some((x, y)) => set_point(window, x, y),
+                None => true,
+            };
+            if size_ok && position_ok {
+                WriteOutcome::Wrote
+            } else {
+                WriteOutcome::Failed
+            }
         })
-        .unwrap_or(false);
-        if !wrote {
+        .unwrap_or(WriteOutcome::Failed);
+        let (next, stop) = advance_follow_health(health, outcome);
+        store_health(gen, next);
+        if outcome == WriteOutcome::Failed && matches!(probe_window(pid, window_id), Probe::Missing)
+        {
+            let _ = finish_stopped(&app, StopReason::TargetGone);
+            return;
+        }
+        if stop {
             let _ = finish_stopped(&app, StopReason::AxRejected);
             return;
         }
+    } else {
+        store_health(
+            gen,
+            FollowHealth {
+                write_failures: 0,
+                fullscreen_waits: 0,
+            },
+        );
     }
     if GENERATION.load(Ordering::Acquire) != gen {
         return;
@@ -773,9 +854,15 @@ fn apply_follow_inner() {
 }
 
 fn finish_stopped(app: &AppHandle, reason: StopReason) -> Result<(), String> {
+    let identity = session_identity();
+    let name = if identity.target_name.is_empty() {
+        "这个应用".to_string()
+    } else {
+        identity.target_name.clone()
+    };
     let note = match reason {
-        StopReason::TargetGone => "Claude Desktop 的窗口已关闭，吸附结束。".to_string(),
-        StopReason::Minimized => "Claude Desktop 已最小化，边框已还原，吸附结束。".to_string(),
+        StopReason::TargetGone => target_gone_message(&name),
+        StopReason::Minimized => minimized_message(&name),
         StopReason::AxRejected => moved_rejected_message(),
     };
     if matches!(reason, StopReason::TargetGone) {
@@ -783,32 +870,57 @@ fn finish_stopped(app: &AppHandle, reason: StopReason) -> Result<(), String> {
         GENERATION.fetch_add(1, Ordering::AcqRel);
         let session = SESSION.with(|slot| slot.borrow_mut().take());
         if let Some(session) = session {
-            if let Ok(dir) = support_dir_for(&session.app) {
-                crate::snap::clear_recovery(&dir);
+            let host = host_window_id(&session.app);
+            let restored = apply_saved(&session.original, true, host);
+            let ax_alive = !matches!(probe_window(session.pid, session.window_id), Probe::Missing);
+            if clear_recovery_after_target_gone(ax_alive, restored) {
+                if let Ok(dir) = support_dir_for(&session.app) {
+                    crate::snap::clear_recovery(&dir);
+                }
             }
         }
         remove_placeholder();
-        publish_stop(app, note);
+        publish_stop(app, &identity, note);
         return Ok(());
     }
     let restore_frame = !matches!(reason, StopReason::Minimized);
     match restore_active(app, restore_frame) {
         Ok(()) => {
-            publish_stop(app, note);
+            publish_stop(app, &identity, note);
             Ok(())
         }
         Err(err) => {
-            publish_stop(app, err.clone());
+            publish_stop(app, &identity, err.clone());
             Err(err)
         }
     }
 }
 
-fn publish_stop(app: &AppHandle, message: String) {
+fn publish_stop(app: &AppHandle, identity: &SnapStatus, message: String) {
     LAST_NOTE.with(|slot| slot.replace(Some(message.clone())));
-    let mut status = idle_status();
+    let mut status = identity.clone();
+    status.active = false;
+    status.mode = SnapMode::Inactive;
     status.message = Some(message);
     let _ = app.emit("snap-ended", &status);
+}
+
+fn session_identity() -> SnapStatus {
+    SESSION.with(|slot| match slot.borrow().as_ref() {
+        Some(session) => status_for(&session.app_id, &session.name, &session.bundle_id),
+        None => idle_status(),
+    })
+}
+
+fn store_health(generation: u64, health: FollowHealth) {
+    SESSION.with(|slot| {
+        if let Some(session) = slot.borrow_mut().as_mut() {
+            if session.generation == generation {
+                session.write_failures = health.write_failures;
+                session.fullscreen_waits = health.fullscreen_waits;
+            }
+        }
+    });
 }
 
 fn restore_active(app: &AppHandle, restore_frame: bool) -> Result<(), String> {
@@ -816,7 +928,9 @@ fn restore_active(app: &AppHandle, restore_frame: bool) -> Result<(), String> {
     GENERATION.fetch_add(1, Ordering::AcqRel);
     let session = SESSION.with(|slot| slot.borrow_mut().take());
     if let Some(session) = session {
-        let restored = apply_saved(&session.original, restore_frame);
+        let host = host_window_id(&session.app);
+        let name = session.name.clone();
+        let restored = apply_saved(&session.original, restore_frame, host);
         remove_placeholder();
         if restored {
             if let Ok(dir) = support_dir_for(&session.app) {
@@ -824,14 +938,14 @@ fn restore_active(app: &AppHandle, restore_frame: bool) -> Result<(), String> {
             }
             return Ok(());
         }
-        return Err("没能还原 Claude Desktop 的边框。下次启动会再试。".into());
+        return Err(chrome_restore_failed_message(&name));
     }
     let _ = apply_recovery_file(app);
     remove_placeholder();
     Ok(())
 }
 
-fn apply_saved(saved: &RecoveryFile, restore_frame: bool) -> bool {
+fn apply_saved(saved: &RecoveryFile, restore_frame: bool, host_window: Option<u32>) -> bool {
     let frame = Rect {
         x: saved.x,
         y: saved.y,
@@ -849,6 +963,9 @@ fn apply_saved(saved: &RecoveryFile, restore_frame: bool) -> bool {
             } else {
                 true
             };
+            if let Some(fullscreen) = saved.fullscreen {
+                let _ = set_fullscreen(window, fullscreen);
+            }
             recovery_may_clear(chrome_ok, restore_frame, frame_ok)
         },
     )
@@ -858,13 +975,21 @@ fn apply_saved(saved: &RecoveryFile, restore_frame: bool) -> bool {
     }
     if restore_frame {
         if let Some(space) = saved.space {
-            if space_of(saved.window_id) != Some(space) {
+            if !spaces_of(saved.window_id).contains(&space) {
                 let _ = move_to_space(saved.window_id, space);
             }
         }
     }
-    if let Some(below) = saved.below_window {
-        let _ = order_above(saved.window_id, below);
+    let stacked = match saved.below_window {
+        Some(below) => order_above(saved.window_id, below),
+        None => false,
+    };
+    if !stacked {
+        if let Some(host_window) = host_window {
+            // The recorded window behind this one is gone. Put the shell back
+            // above the target so a restored window is not left covering it.
+            let _ = order_above(host_window, saved.window_id);
+        }
     }
     true
 }
@@ -874,7 +999,7 @@ fn apply_recovery_file(app: &AppHandle) -> Result<(), String> {
     let Some(saved) = read_recovery(&dir) else {
         return Ok(());
     };
-    if saved.bundle_id != target_parts().map(|(_, _, bundle)| bundle).unwrap_or("") {
+    if !confirmed_bundle(&saved.bundle_id) {
         crate::snap::clear_recovery(&dir);
         return Ok(());
     }
@@ -899,7 +1024,7 @@ fn apply_recovery_file(app: &AppHandle) -> Result<(), String> {
         crate::snap::clear_recovery(&dir);
         return Ok(());
     }
-    if apply_saved(&saved, true) {
+    if apply_saved(&saved, true, host_window_id(app)) {
         crate::snap::clear_recovery(&dir);
     }
     Ok(())
@@ -908,7 +1033,7 @@ fn apply_recovery_file(app: &AppHandle) -> Result<(), String> {
 fn current_status() -> SnapStatus {
     SESSION.with(|slot| match slot.borrow().as_ref() {
         Some(session) => {
-            let mut status = idle_status();
+            let mut status = status_for(&session.app_id, &session.name, &session.bundle_id);
             status.active = true;
             status.mode = session.mode;
             status.message = Some(session.message.clone());
@@ -1051,6 +1176,62 @@ fn rects_near(left: Rect, right: Rect) -> bool {
         && (left.y - right.y).abs() <= 4.0
         && (left.width - right.width).abs() <= 4.0
         && (left.height - right.height).abs() <= 4.0
+}
+
+fn process_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // `kill(pid, 0)` checks the process without signaling it. EPERM still means
+    // the process exists.
+    let alive = unsafe { kill(pid, 0) == 0 };
+    alive || std::io::Error::last_os_error().raw_os_error() == Some(1)
+}
+
+fn read_fullscreen(window: *mut c_void) -> Option<bool> {
+    read_app_bool(window, "AXFullScreen")
+}
+
+fn set_fullscreen(window: *mut c_void, value: bool) -> bool {
+    set_app_bool(window, "AXFullScreen", value)
+}
+
+fn exit_fullscreen(window: *mut c_void) -> bool {
+    if !should_exit_fullscreen(read_fullscreen(window) == Some(true)) {
+        return true;
+    }
+    if !set_fullscreen(window, false) {
+        return false;
+    }
+    for _ in 0..10 {
+        if read_fullscreen(window) != Some(true) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    read_fullscreen(window) != Some(true)
+}
+
+fn display_id_containing(x: f64, y: f64) -> Option<u32> {
+    let mut ids = [0u32; 16];
+    let mut count = 0u32;
+    let err = unsafe { CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut count) };
+    if err != 0 {
+        return None;
+    }
+    for id in ids.into_iter().take(count as usize) {
+        let bounds = unsafe { CGDisplayBounds(id) };
+        let rect = Rect {
+            x: bounds.origin.x,
+            y: bounds.origin.y,
+            width: bounds.size.width,
+            height: bounds.size.height,
+        };
+        if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
+            return Some(id);
+        }
+    }
+    None
 }
 
 fn display_containing(x: f64, y: f64) -> Rect {
@@ -1348,28 +1529,37 @@ fn order_above(window_id: u32, other: u32) -> bool {
     result == 0
 }
 
-fn space_of(window_id: u32) -> Option<u64> {
-    let sky = sky()?;
-    let spaces_fn = sky.spaces?;
+fn spaces_of(window_id: u32) -> Vec<u64> {
+    let Some(sky) = sky() else {
+        return Vec::new();
+    };
+    let Some(spaces_fn) = sky.spaces else {
+        return Vec::new();
+    };
+    let Some(array) = window_array(window_id) else {
+        return Vec::new();
+    };
     let cid = unsafe { (sky.connection)() };
-    let array = window_array(window_id)?;
     let spaces = unsafe { spaces_fn(cid, 0x7, array.get()) };
     if spaces.is_null() {
-        return None;
+        return Vec::new();
     }
     let count = unsafe { CFArrayGetCount(spaces) };
-    let mut space = None;
-    if count > 0 {
-        let number = unsafe { CFArrayGetValueAtIndex(spaces, 0) };
+    let mut found = Vec::new();
+    for index in 0..count {
+        let number = unsafe { CFArrayGetValueAtIndex(spaces, index) };
         let mut value = 0i64;
         if unsafe { CFNumberGetValue(number, 4, &mut value as *mut i64 as *mut c_void) } != 0
             && value >= 0
         {
-            space = Some(value as u64);
+            let space = value as u64;
+            if !found.contains(&space) {
+                found.push(space);
+            }
         }
     }
     release(spaces);
-    space
+    found
 }
 
 fn move_to_space(window_id: u32, space: u64) {
@@ -1486,15 +1676,18 @@ fn remove_placeholder() {
 
 fn start_follow() -> Result<(), String> {
     stop_sources();
-    if start_display_link().is_ok() {
+    if start_display_link(None).is_ok() {
         return Ok(());
     }
     start_timer().map_err(|_| "无法启动窗口跟随，已把窗口放回原来的位置。".to_string())
 }
 
-fn start_display_link() -> Result<(), ()> {
+fn start_display_link(display: Option<u32>) -> Result<(), ()> {
     let mut link = ptr::null_mut();
-    let created = unsafe { CVDisplayLinkCreateWithActiveCGDisplays(&mut link) };
+    let created = match display {
+        Some(display) => unsafe { CVDisplayLinkCreateWithCGDisplay(display, &mut link) },
+        None => unsafe { CVDisplayLinkCreateWithActiveCGDisplays(&mut link) },
+    };
     if created != 0 || link.is_null() {
         return Err(());
     }
@@ -1509,7 +1702,51 @@ fn start_display_link() -> Result<(), ()> {
         return Err(());
     }
     LINK.store(link, Ordering::Release);
+    LINK_DISPLAY.store(display.unwrap_or(LINK_UNBOUND), Ordering::Release);
     Ok(())
+}
+
+fn ensure_display_link(display: Option<u32>) {
+    let link_display = if LINK.load(Ordering::Acquire).is_null() {
+        None
+    } else {
+        let bound = LINK_DISPLAY.load(Ordering::Acquire);
+        if bound == LINK_UNBOUND {
+            None
+        } else {
+            Some(bound)
+        }
+    };
+    let DisplayLinkPlan::Retarget(display) = follow_display(display, link_display) else {
+        return;
+    };
+    if LINK_ATTEMPTED.load(Ordering::Acquire) == display && !LINK.load(Ordering::Acquire).is_null()
+    {
+        return;
+    }
+    LINK_ATTEMPTED.store(display, Ordering::Release);
+    let previous = LINK.swap(ptr::null_mut(), Ordering::AcqRel);
+    if start_display_link(Some(display)).is_ok() {
+        release_link(previous);
+        return;
+    }
+    if !previous.is_null() {
+        LINK.store(previous, Ordering::Release);
+        return;
+    }
+    if start_display_link(None).is_err() && TIMER.load(Ordering::Acquire).is_null() {
+        let _ = start_timer();
+    }
+}
+
+fn release_link(link: *mut c_void) {
+    if link.is_null() {
+        return;
+    }
+    unsafe {
+        CVDisplayLinkStop(link);
+        CVDisplayLinkRelease(link);
+    }
 }
 
 fn start_timer() -> Result<(), ()> {
@@ -1535,13 +1772,10 @@ fn start_timer() -> Result<(), ()> {
 }
 
 fn stop_sources() {
+    LINK_DISPLAY.store(LINK_UNBOUND, Ordering::Release);
+    LINK_ATTEMPTED.store(LINK_UNBOUND, Ordering::Release);
     let link = LINK.swap(ptr::null_mut(), Ordering::AcqRel);
-    if !link.is_null() {
-        unsafe {
-            CVDisplayLinkStop(link);
-            CVDisplayLinkRelease(link);
-        }
-    }
+    release_link(link);
     let timer = TIMER.swap(ptr::null_mut(), Ordering::AcqRel);
     if !timer.is_null() {
         unsafe {
