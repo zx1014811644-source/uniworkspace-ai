@@ -39,6 +39,9 @@ jobs:
       - name: Check catalog
         run: pnpm catalog:check
 
+      - name: Test partition isolation logic
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
       - name: Build unsigned macOS debug app
         env:
           MACOSX_DEPLOYMENT_TARGET: "13.0"

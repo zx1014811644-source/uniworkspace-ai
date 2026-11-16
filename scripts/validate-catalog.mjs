@@ -28,6 +28,13 @@ const nativeIds = [
   "accio-work-desktop",
 ];
 
+const week2Urls = {
+  chatgpt: "https://chatgpt.com/",
+  claude: "https://claude.ai/",
+  gemini: "https://gemini.google.com/",
+  kimi: "https://www.kimi.com/",
+};
+
 const webStatuses = new Set(["official", "pending", "desktopOnly"]);
 const bundleStatuses = new Set(["confirmed", "pending", "not-applicable"]);
 const errors = [];
@@ -79,6 +86,12 @@ for (const app of catalog.apps ?? []) {
   } else if (app.bundleId !== null) {
     fail(`${app.id} bundleId must be null unless confirmed`);
   }
+}
+
+for (const [id, url] of Object.entries(week2Urls)) {
+  const app = catalog.apps.find((entry) => entry.id === id);
+  if (!app) fail(`missing week 2 app ${id}`);
+  else if (app.webUrl !== url) fail(`${id} webUrl must stay ${url}`);
 }
 
 for (const id of webIds) {
