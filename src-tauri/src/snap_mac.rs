@@ -213,7 +213,8 @@ extern "C" {
 extern "C" {
     fn dlopen(path: *const i8, mode: i32) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
-    fn dispatch_get_main_queue() -> *mut c_void;
+    /// `dispatch_get_main_queue()` is a macro for this object in current SDKs.
+    static _dispatch_main_q: u8;
     fn dispatch_async_f(queue: *mut c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
     fn dispatch_source_create(
         kind: *const c_void,
@@ -1512,7 +1513,7 @@ fn start_display_link() -> Result<(), ()> {
 }
 
 fn start_timer() -> Result<(), ()> {
-    let queue = unsafe { dispatch_get_main_queue() };
+    let queue = main_queue();
     let timer = unsafe {
         dispatch_source_create(
             std::ptr::addr_of!(_dispatch_source_type_timer).cast(),
@@ -1570,7 +1571,11 @@ fn queue_apply() {
     if FRAME_QUEUED.swap(true, Ordering::AcqRel) {
         return;
     }
-    unsafe { dispatch_async_f(dispatch_get_main_queue(), ptr::null_mut(), apply_dispatched) };
+    unsafe { dispatch_async_f(main_queue(), ptr::null_mut(), apply_dispatched) };
+}
+
+fn main_queue() -> *mut c_void {
+    std::ptr::addr_of!(_dispatch_main_q).cast_mut().cast()
 }
 
 extern "C" fn apply_dispatched(_context: *mut c_void) {
