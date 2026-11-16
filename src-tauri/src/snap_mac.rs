@@ -32,10 +32,11 @@ use crate::snap::{
     host_missing_message, idle_status, minimized_message, moved_rejected_message,
     pick_target_window, placeholder_rect, plan_follow, read_recovery, recovery_may_clear,
     rejection, rollback_chrome, should_exit_fullscreen, side_by_side_message, side_by_side_rect,
-    status_for, support_dir_for, target_gone_message, target_is_above, target_parts,
-    unreadable_frame_message, unreadable_window_message, window_behind, write_recovery,
-    AfterChromeMove, ChromeRecord, DisplayLinkPlan, FollowHealth, FollowInput, RecoveryFile, Rect,
-    SnapFrame, SnapMode, SnapStatus, StopReason, WriteOutcome, FOLLOW_EPSILON, FOLLOW_INTERVAL_NS,
+    skip_repeated_display_link, status_for, support_dir_for, target_gone_message, target_is_above,
+    target_parts, unreadable_frame_message, unreadable_window_message, window_behind,
+    write_recovery, AfterChromeMove, ChromeRecord, DisplayLinkPlan, FollowHealth, FollowInput,
+    RecoveryFile, Rect, SnapFrame, SnapMode, SnapStatus, StopReason, WriteOutcome, FOLLOW_EPSILON,
+    FOLLOW_INTERVAL_NS,
 };
 use crate::window_mac;
 
@@ -1720,8 +1721,18 @@ fn ensure_display_link(display: Option<u32>) {
     let DisplayLinkPlan::Retarget(display) = follow_display(display, link_display) else {
         return;
     };
-    if LINK_ATTEMPTED.load(Ordering::Acquire) == display && !LINK.load(Ordering::Acquire).is_null()
-    {
+    let attempted = LINK_ATTEMPTED.load(Ordering::Acquire);
+    let attempted = if attempted == LINK_UNBOUND {
+        None
+    } else {
+        Some(attempted)
+    };
+    if skip_repeated_display_link(
+        attempted,
+        display,
+        !LINK.load(Ordering::Acquire).is_null(),
+        !TIMER.load(Ordering::Acquire).is_null(),
+    ) {
         return;
     }
     LINK_ATTEMPTED.store(display, Ordering::Release);
