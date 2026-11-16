@@ -27,16 +27,16 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::detector::{self, RawWindow};
 use crate::snap::{
     advance_follow_health, after_chrome_and_placeholder, beside_accepted, chrome_removed,
-    chrome_restore_failed_message, clear_recovery_after_target_gone, confirmed_bundle,
-    embedded_message, follow_display, frame_usable, frame_write, hold_for_fullscreen_exit,
-    host_missing_message, idle_status, minimized_message, moved_rejected_message,
-    pick_target_window, placeholder_rect, plan_follow, read_recovery, recovery_may_clear,
-    rejection, rollback_chrome, should_exit_fullscreen, side_by_side_message, side_by_side_rect,
-    skip_repeated_display_link, status_for, support_dir_for, target_gone_message, target_is_above,
-    target_parts, unreadable_frame_message, unreadable_window_message, window_behind,
-    write_recovery, AfterChromeMove, ChromeRecord, DisplayLinkPlan, FollowHealth, FollowInput,
-    RecoveryFile, Rect, SnapFrame, SnapMode, SnapStatus, StopReason, WriteOutcome, FOLLOW_EPSILON,
-    FOLLOW_INTERVAL_NS,
+    chrome_restore_failed_message, chrome_write_blocks_restore, clear_recovery_after_target_gone,
+    confirmed_bundle, embedded_message, follow_display, frame_usable, frame_write,
+    hold_for_fullscreen_exit, host_missing_message, idle_status, minimized_message,
+    moved_rejected_message, pick_target_window, placeholder_rect, plan_follow, read_recovery,
+    recovery_blocked_message, recovery_may_clear, rejection, rollback_chrome,
+    should_exit_fullscreen, side_by_side_message, side_by_side_rect, skip_repeated_display_link,
+    status_for, support_dir_for, target_gone_message, target_is_above, target_parts,
+    unreadable_frame_message, unreadable_window_message, window_behind, write_recovery,
+    AfterChromeMove, ChromeRecord, DisplayLinkPlan, FollowHealth, FollowInput, RecoveryFile, Rect,
+    SnapFrame, SnapMode, SnapStatus, StopReason, WriteOutcome, FOLLOW_EPSILON, FOLLOW_INTERVAL_NS,
 };
 use crate::window_mac;
 
@@ -354,6 +354,11 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
         restore_active(&app, true)?;
     }
     let _ = apply_recovery_file(&app);
+    if let Ok(dir) = support_dir_for(&app) {
+        if crate::snap::recovery_path(&dir).exists() {
+            return Err(recovery_blocked_message().to_string());
+        }
+    }
 
     let trusted = window_mac::trusted_on_caller_thread();
     let snapshot = window_mac::snapshot_on_caller_thread()?;
@@ -652,28 +657,44 @@ fn restore_records(application: *mut c_void, window: *mut c_void, saved: &Recove
     let mut ok = true;
     for record in &saved.chrome {
         if record.attribute == "AXTitleBarVisible" {
-            if !set_app_bool(window, "AXTitleBarVisible", record.hidden) {
+            let write_ok = set_app_bool(window, "AXTitleBarVisible", record.hidden);
+            let current = read_app_bool(window, "AXTitleBarVisible");
+            if chrome_write_blocks_restore(record.hidden, current, write_ok) {
                 ok = false;
             }
             continue;
         }
         let Some(element) = copy_attr(window, &record.attribute) else {
-            ok = false;
+            if chrome_write_blocks_restore(record.hidden, None, false) {
+                ok = false;
+            }
             continue;
         };
-        match ns_bool(record.hidden) {
-            Some(number) if set_attr(element, "AXHidden", number) => {}
-            _ => ok = false,
+        let write_ok = match ns_bool(record.hidden) {
+            Some(number) => set_attr(element, "AXHidden", number),
+            None => false,
+        };
+        let current = copy_attr(element, "AXHidden").and_then(|value| {
+            let hidden = read_bool(value);
+            release(value);
+            hidden
+        });
+        if chrome_write_blocks_restore(record.hidden, current, write_ok) {
+            ok = false;
         }
         release(element);
     }
     if let Some(value) = saved.enhanced {
-        if !set_app_bool(application, "AXEnhancedUserInterface", value) {
+        let write_ok = set_app_bool(application, "AXEnhancedUserInterface", value);
+        let current = read_app_bool(application, "AXEnhancedUserInterface");
+        if chrome_write_blocks_restore(value, current, write_ok) {
             ok = false;
         }
     }
     if let Some(value) = saved.manual {
-        if !set_app_bool(application, "AXManualAccessibility", value) {
+        let write_ok = set_app_bool(application, "AXManualAccessibility", value);
+        let current = read_app_bool(application, "AXManualAccessibility");
+        if chrome_write_blocks_restore(value, current, write_ok) {
             ok = false;
         }
     }

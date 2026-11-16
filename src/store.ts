@@ -351,6 +351,12 @@ export const useShellStore = create<ShellState>((set, get) => {
         await get().assignApp(existing.id);
         return;
       }
+      if (get().snap?.paneIndex === get().focusedPane) {
+        await get().detachSnap();
+        if (get().snap?.paneIndex === get().focusedPane) {
+          return;
+        }
+      }
       const id = `custom-${crypto.randomUUID()}`;
       const requested = displayName?.trim() ?? "";
       const name = requested || new URL(url).hostname;
