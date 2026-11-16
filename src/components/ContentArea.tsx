@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import { errorText, syncPanes, type PaneSpec } from "../partitions";
+import { framesDiffer, type SnapFrame } from "../snap";
 import { useShellStore } from "../store";
 import { runningInTauri } from "../window";
 import { embedTarget, visibleCount, type LayoutMode } from "../workspace";
@@ -33,18 +34,25 @@ function PaneGrid() {
   const syncError = useShellStore((state) => state.syncError);
   const setSyncError = useShellStore((state) => state.setSyncError);
   const hosts = useRef<(HTMLDivElement | null)[]>([]);
+  const lastSnapFrame = useRef<SnapFrame | null>(null);
+  const snap = useShellStore((state) => state.snap);
+  const snapRequest = useShellStore((state) => state.snapRequest);
+  const snapBusy = useShellStore((state) => state.snapBusy);
   const count = visibleCount(layout);
 
   useLayoutEffect(() => {
     if (!runningInTauri()) {
       return;
     }
-    let frame = 0;
+    let frameId = 0;
     const publish = () => {
       const state = useShellStore.getState();
       const visible = visibleCount(state.layout);
       const panes: PaneSpec[] = [];
       for (let index = 0; index < visible; index += 1) {
+        if (state.snap?.paneIndex === index) {
+          continue;
+        }
         const appId = state.slots[index];
         const host = hosts.current[index];
         if (!appId || !host) {
@@ -75,10 +83,33 @@ function PaneGrid() {
         .catch((reason: unknown) => {
           setSyncError(errorText(reason));
         });
+      if (state.snap && state.snap.paneIndex >= visible && !state.snapBusy) {
+        void state.detachSnap();
+        return;
+      }
+      if (state.snapRequest !== null && !state.snapBusy) {
+        const rect = measureHost(hosts.current[state.snapRequest]);
+        if (rect) {
+          void state.attachSnap(state.snapRequest, rect);
+        }
+        return;
+      }
+      if (!state.snap || state.snapBusy) {
+        lastSnapFrame.current = null;
+        return;
+      }
+      const rect = measureHost(hosts.current[state.snap.paneIndex]);
+      if (!rect) {
+        return;
+      }
+      if (!lastSnapFrame.current || framesDiffer(lastSnapFrame.current, rect)) {
+        lastSnapFrame.current = rect;
+        void state.updateSnapFrame(rect);
+      }
     };
     const schedule = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(publish);
+      cancelAnimationFrame(frameId);
+      frameId = requestAnimationFrame(publish);
     };
     schedule();
     const observer = new ResizeObserver(() => {
@@ -92,11 +123,11 @@ function PaneGrid() {
     }
     window.addEventListener("resize", schedule);
     return () => {
-      cancelAnimationFrame(frame);
+      cancelAnimationFrame(frameId);
       observer.disconnect();
       window.removeEventListener("resize", schedule);
     };
-  }, [count, customApps, focusedPane, layout, reopenNonce, setSyncError, slots]);
+  }, [count, customApps, focusedPane, layout, reopenNonce, setSyncError, slots, snap, snapBusy, snapRequest]);
 
   const gridClass =
     layout === "single"
@@ -169,6 +200,17 @@ function ClearButton() {
   );
 }
 
+function measureHost(host: HTMLDivElement | null | undefined): SnapFrame | null {
+  if (!host) {
+    return null;
+  }
+  const rect = host.getBoundingClientRect();
+  if (rect.width < 2 || rect.height < 2) {
+    return null;
+  }
+  return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+}
+
 function Pane({
   index,
   hostRef,
@@ -180,23 +222,41 @@ function Pane({
   const customApps = useShellStore((state) => state.customApps);
   const focused = useShellStore((state) => state.focusedPane === index);
   const note = useShellStore((state) => (appId ? state.paneNotes[appId] : undefined));
+  const snap = useShellStore((state) => (state.snap?.paneIndex === index ? state.snap : null));
   const focusPane = useShellStore((state) => state.focusPane);
   const clearPane = useShellStore((state) => state.clearPane);
+  const detachSnap = useShellStore((state) => state.detachSnap);
   const target = appId ? embedTarget(appId, customApps) : null;
+  const embedded = snap?.mode === "embedded";
 
   return (
     <section
-      className={`flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border bg-white ${
-        focused ? "border-shell-accent" : "border-shell-line"
-      }`}
+      className={`flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border ${
+        embedded ? "bg-shell-canvas" : "bg-white"
+      } ${focused ? "border-shell-accent" : "border-shell-line"}`}
       onMouseDown={() => {
         void focusPane(index);
       }}
     >
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-shell-line px-2">
-        <span className="truncate text-xs font-medium">{target?.name ?? "空格"}</span>
-        {note ? <span className="truncate text-[11px] text-shell-accent">{note}</span> : null}
-        {appId ? (
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-shell-line bg-white px-2">
+        <span className="truncate text-xs font-medium">
+          {snap ? "Claude Desktop" : target?.name ?? "空格"}
+        </span>
+        {note && !snap ? (
+          <span className="truncate text-[11px] text-shell-accent">{note}</span>
+        ) : null}
+        {snap ? (
+          <button
+            type="button"
+            className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-shell-muted hover:bg-black/5 hover:text-shell-ink"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => {
+              void detachSnap();
+            }}
+          >
+            拆卸
+          </button>
+        ) : appId ? (
           <button
             type="button"
             className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-shell-muted hover:bg-black/5 hover:text-shell-ink"
@@ -211,9 +271,17 @@ function Pane({
       </div>
       <div
         ref={hostRef}
-        className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm leading-6 text-shell-muted"
+        className={`flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm leading-6 text-shell-muted ${
+          embedded ? "bg-transparent" : ""
+        }`}
       >
-        {target ? (
+        {embedded ? (
+          <div className="pointer-events-none flex h-full w-full items-start justify-center rounded-sm border border-dashed border-shell-line pt-3 text-xs">
+            透明占位。Claude Desktop 会对齐到这块区域。
+          </div>
+        ) : snap ? (
+          snap.message
+        ) : target ? (
           runningInTauri() ? (
             "正在打开这一格的分区。"
           ) : (
