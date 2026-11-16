@@ -369,10 +369,26 @@ pub fn rollback_chrome(chrome_dirty: bool, mode: Option<SnapMode>) -> bool {
     chrome_dirty && mode != Some(SnapMode::Embedded)
 }
 
-/// The recovery file may be deleted only after every chrome write succeeded.
-/// A frame write is required only when this restore is supposed to move the window.
+/// The recovery file may be deleted only after every chrome write that still
+/// matters has succeeded. A frame write is required only when this restore is
+/// supposed to move the window.
 pub fn recovery_may_clear(chrome_ok: bool, frame_requested: bool, frame_ok: bool) -> bool {
     chrome_ok && (!frame_requested || frame_ok)
+}
+
+/// A failed Accessibility write does not fail restore when the live value is
+/// already the saved one. Side-by-side follow often rewrites read-only chrome
+/// that was never changed. A value that is still different, or that cannot be
+/// read, still blocks clearing the recovery file.
+pub fn chrome_write_blocks_restore(saved: bool, current: Option<bool>, write_ok: bool) -> bool {
+    if write_ok {
+        return false;
+    }
+    !matches!(current, Some(value) if value == saved)
+}
+
+pub fn recovery_blocked_message() -> &'static str {
+    "上一个窗口的边框还没还原，这次没有开始新的吸附，也没有覆盖还原记录。"
 }
 
 /// A fullscreen target has to leave fullscreen before its frame can match a pane.
@@ -594,11 +610,18 @@ pub fn recovery_path(dir: &Path) -> PathBuf {
 
 pub fn write_recovery(dir: &Path, file: &RecoveryFile) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|err| format!("无法记录吸附还原信息: {err}"))?;
+    let path = recovery_path(dir);
+    if path.exists() {
+        return Err(recovery_blocked_message().to_string());
+    }
     let body =
         serde_json::to_vec_pretty(file).map_err(|err| format!("无法记录吸附还原信息: {err}"))?;
-    let path = recovery_path(dir);
     let tmp = dir.join("snap-recovery.json.tmp");
     std::fs::write(&tmp, &body).map_err(|err| format!("无法记录吸附还原信息: {err}"))?;
+    if path.exists() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(recovery_blocked_message().to_string());
+    }
     std::fs::rename(&tmp, &path).map_err(|err| format!("无法记录吸附还原信息: {err}"))?;
     Ok(())
 }
@@ -948,6 +971,18 @@ mod tests {
         assert!(rollback_chrome(true, None));
         assert!(!rollback_chrome(true, Some(SnapMode::Embedded)));
         assert!(!rollback_chrome(false, Some(SnapMode::SideBySide)));
+        assert!(
+            !chrome_write_blocks_restore(false, Some(false), false),
+            "an unchanged read-only value is already restored"
+        );
+        assert!(!chrome_write_blocks_restore(true, Some(true), true));
+        assert!(chrome_write_blocks_restore(false, Some(true), false));
+        assert!(chrome_write_blocks_restore(false, None, false));
+        assert!(recovery_may_clear(true, true, true));
+        assert!(
+            !recovery_may_clear(false, false, true),
+            "a real chrome failure still keeps the recovery file"
+        );
         assert!(!recovery_may_clear(false, true, true));
         assert!(!recovery_may_clear(false, false, true));
         assert!(!recovery_may_clear(true, true, false));
@@ -1074,6 +1109,67 @@ mod tests {
         assert!(read_recovery(&dir).is_none());
         clear_recovery(&dir);
         assert!(read_recovery(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_snap_does_not_overwrite_an_unrestored_recovery_file() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("uniworkspace-snap-keep-{nanos}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let original = RecoveryFile {
+            bundle_id: "com.anthropic.claudefordesktop".into(),
+            pid: 42,
+            window_id: 7,
+            x: 12.0,
+            y: 24.0,
+            width: 800.0,
+            height: 600.0,
+            below_window: Some(3),
+            space: Some(9),
+            chrome: vec![ChromeRecord {
+                attribute: "AXTitleUIElement".into(),
+                hidden: false,
+            }],
+            enhanced: Some(false),
+            manual: None,
+            fullscreen: Some(false),
+        };
+        write_recovery(&dir, &original).unwrap();
+        let replacement = RecoveryFile {
+            bundle_id: "com.openai.codex".into(),
+            pid: 90,
+            window_id: 11,
+            x: 1.0,
+            y: 1.0,
+            width: 400.0,
+            height: 300.0,
+            below_window: None,
+            space: None,
+            chrome: vec![ChromeRecord {
+                attribute: "AXCloseButton".into(),
+                hidden: true,
+            }],
+            enhanced: None,
+            manual: None,
+            fullscreen: None,
+        };
+        let err = write_recovery(&dir, &replacement).unwrap_err();
+        assert!(err.contains("没有覆盖"));
+        assert_eq!(read_recovery(&dir).unwrap().chrome, original.chrome);
+        assert_eq!(
+            read_recovery(&dir).unwrap().bundle_id,
+            "com.anthropic.claudefordesktop"
+        );
+        assert!(!recovery_may_clear(false, true, true));
+        assert!(read_recovery(&dir).is_some());
+        clear_recovery(&dir);
+        write_recovery(&dir, &replacement).unwrap();
+        assert_eq!(read_recovery(&dir).unwrap().bundle_id, "com.openai.codex");
+        clear_recovery(&dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
