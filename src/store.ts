@@ -16,6 +16,7 @@ import {
   snapAttach,
   snapDetach,
   snapUpdate,
+  type SnapStatus,
   type SnapFrame,
   type SnapMode,
 } from "./snap";
@@ -84,6 +85,7 @@ interface ShellState {
   attachSnap: (paneIndex: number, frame: SnapFrame) => Promise<void>;
   updateSnapFrame: (frame: SnapFrame) => Promise<void>;
   detachSnap: () => Promise<void>;
+  applySnapEnded: (status: SnapStatus) => void;
 }
 
 export interface LiveSnap {
@@ -523,6 +525,17 @@ export const useShellStore = create<ShellState>((set, get) => {
           set({ snapBusy: false, snapError: errorText(reason) });
         }
       }),
+    applySnapEnded: (status) => {
+      if (status.active) {
+        return;
+      }
+      set({
+        snap: null,
+        snapRequest: null,
+        snapNote: null,
+        snapError: status.message,
+      });
+    },
     chooseA11y: async (choice) => {
       if (!runningInTauri()) {
         if (choice !== "webOnly") {

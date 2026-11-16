@@ -339,6 +339,12 @@ pub fn rollback_chrome(chrome_dirty: bool, mode: Option<SnapMode>) -> bool {
     chrome_dirty && mode != Some(SnapMode::Embedded)
 }
 
+/// The recovery file may be deleted only after every chrome write succeeded.
+/// A frame write is required only when this restore is supposed to move the window.
+pub fn recovery_may_clear(chrome_ok: bool, frame_requested: bool, frame_ok: bool) -> bool {
+    chrome_ok && (!frame_requested || frame_ok)
+}
+
 pub fn plan_follow(input: &FollowInput) -> FollowPlan {
     if input.minimized {
         return FollowPlan {
@@ -728,6 +734,11 @@ mod tests {
         assert!(rollback_chrome(true, None));
         assert!(!rollback_chrome(true, Some(SnapMode::Embedded)));
         assert!(!rollback_chrome(false, Some(SnapMode::SideBySide)));
+        assert!(!recovery_may_clear(false, true, true));
+        assert!(!recovery_may_clear(false, false, true));
+        assert!(!recovery_may_clear(true, true, false));
+        assert!(recovery_may_clear(true, false, false));
+        assert!(recovery_may_clear(true, true, true));
         assert!(!beside_accepted(false));
         assert!(beside_accepted(true));
     }

@@ -21,16 +21,16 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2_foundation::NSString;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::detector::{self, RawWindow};
 use crate::snap::{
     after_chrome_and_placeholder, beside_accepted, chrome_removed, embedded_message, frame_usable,
     idle_status, moved_rejected_message, pick_target_window, placeholder_rect, plan_follow,
-    read_recovery, rejection, rollback_chrome, side_by_side_message, side_by_side_rect,
-    support_dir_for, target_is_above, target_parts, window_behind, write_recovery, AfterChromeMove,
-    ChromeRecord, FollowInput, RecoveryFile, Rect, SnapFrame, SnapMode, SnapStatus, StopReason,
-    FOLLOW_INTERVAL_NS,
+    read_recovery, recovery_may_clear, rejection, rollback_chrome, side_by_side_message,
+    side_by_side_rect, support_dir_for, target_is_above, target_parts, window_behind,
+    write_recovery, AfterChromeMove, ChromeRecord, FollowInput, RecoveryFile, Rect, SnapFrame,
+    SnapMode, SnapStatus, StopReason, FOLLOW_INTERVAL_NS,
 };
 use crate::window_mac;
 
@@ -422,16 +422,24 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
             })
             .unwrap_or(false);
             if !beside_accepted(side_ok) {
-                let _ = with_window(pid, window_id, SIDE_TIMEOUT, |application, window| {
-                    restore_records(application, window, &recovery);
-                    set_frame(window, original_frame)
-                });
+                let restored = with_window(pid, window_id, SIDE_TIMEOUT, |application, window| {
+                    let chrome_ok = restore_records(application, window, &recovery);
+                    let frame_ok = set_frame(window, original_frame);
+                    recovery_may_clear(chrome_ok, true, frame_ok)
+                })
+                .unwrap_or(false);
                 if let Some(below) = recovery.below_window {
                     let _ = order_above(window_id, below);
                 }
-                crate::snap::clear_recovery(&dir);
+                if restored {
+                    crate::snap::clear_recovery(&dir);
+                }
                 remove_placeholder();
-                return Err(moved_rejected_message());
+                return Err(if restored {
+                    moved_rejected_message()
+                } else {
+                    "没能还原 Claude Desktop 的边框。下次启动会再试。".into()
+                });
             }
             SnapMode::SideBySide
         }
@@ -602,25 +610,36 @@ fn hide_chrome(window: *mut c_void, originals: &Originals) -> (bool, bool) {
     (removed, dirty)
 }
 
-fn restore_records(application: *mut c_void, window: *mut c_void, saved: &RecoveryFile) {
+fn restore_records(application: *mut c_void, window: *mut c_void, saved: &RecoveryFile) -> bool {
+    let mut ok = true;
     for record in &saved.chrome {
         if record.attribute == "AXTitleBarVisible" {
-            let _ = set_app_bool(window, "AXTitleBarVisible", record.hidden);
+            if !set_app_bool(window, "AXTitleBarVisible", record.hidden) {
+                ok = false;
+            }
             continue;
         }
-        if let Some(element) = copy_attr(window, &record.attribute) {
-            if let Some(number) = ns_bool(record.hidden) {
-                let _ = set_attr(element, "AXHidden", number);
-            }
-            release(element);
+        let Some(element) = copy_attr(window, &record.attribute) else {
+            ok = false;
+            continue;
+        };
+        match ns_bool(record.hidden) {
+            Some(number) if set_attr(element, "AXHidden", number) => {}
+            _ => ok = false,
         }
+        release(element);
     }
     if let Some(value) = saved.enhanced {
-        let _ = set_app_bool(application, "AXEnhancedUserInterface", value);
+        if !set_app_bool(application, "AXEnhancedUserInterface", value) {
+            ok = false;
+        }
     }
     if let Some(value) = saved.manual {
-        let _ = set_app_bool(application, "AXManualAccessibility", value);
+        if !set_app_bool(application, "AXManualAccessibility", value) {
+            ok = false;
+        }
     }
+    ok
 }
 
 fn apply_follow() {
@@ -759,7 +778,6 @@ fn finish_stopped(app: &AppHandle, reason: StopReason) -> Result<(), String> {
         StopReason::AxRejected => moved_rejected_message(),
     };
     if matches!(reason, StopReason::TargetGone) {
-        LAST_NOTE.with(|slot| slot.replace(Some(note)));
         stop_sources();
         GENERATION.fetch_add(1, Ordering::AcqRel);
         let session = SESSION.with(|slot| slot.borrow_mut().take());
@@ -769,19 +787,27 @@ fn finish_stopped(app: &AppHandle, reason: StopReason) -> Result<(), String> {
             }
         }
         remove_placeholder();
+        publish_stop(app, note);
         return Ok(());
     }
     let restore_frame = !matches!(reason, StopReason::Minimized);
     match restore_active(app, restore_frame) {
         Ok(()) => {
-            LAST_NOTE.with(|slot| slot.replace(Some(note)));
+            publish_stop(app, note);
             Ok(())
         }
         Err(err) => {
-            LAST_NOTE.with(|slot| slot.replace(Some(err.clone())));
+            publish_stop(app, err.clone());
             Err(err)
         }
     }
+}
+
+fn publish_stop(app: &AppHandle, message: String) {
+    LAST_NOTE.with(|slot| slot.replace(Some(message.clone())));
+    let mut status = idle_status();
+    status.message = Some(message);
+    let _ = app.emit("snap-ended", &status);
 }
 
 fn restore_active(app: &AppHandle, restore_frame: bool) -> Result<(), String> {
@@ -816,12 +842,13 @@ fn apply_saved(saved: &RecoveryFile, restore_frame: bool) -> bool {
         saved.window_id,
         SIDE_TIMEOUT,
         |application, window| {
-            restore_records(application, window, saved);
-            if restore_frame {
+            let chrome_ok = restore_records(application, window, saved);
+            let frame_ok = if restore_frame {
                 set_frame(window, frame)
             } else {
                 true
-            }
+            };
+            recovery_may_clear(chrome_ok, restore_frame, frame_ok)
         },
     )
     .unwrap_or(false);

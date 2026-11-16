@@ -4,6 +4,7 @@ import { Sidebar } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
 import { desktopScan, scanWait } from "./desktop";
 import { errorText, listenForPaneNotices } from "./partitions";
+import { listenForSnapEnded } from "./snap";
 import { useShellStore } from "./store";
 import { runningInTauri } from "./window";
 
@@ -36,6 +37,27 @@ export default function App() {
       unlisten?.();
     };
   }, [notePane]);
+
+  useEffect(() => {
+    if (!runningInTauri()) {
+      return;
+    }
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listenForSnapEnded((status) => {
+      useShellStore.getState().applySnapEnded(status);
+    }).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!runningInTauri()) {

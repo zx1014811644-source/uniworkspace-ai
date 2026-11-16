@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /// Must match `SNAP_TARGET_ID` in `src-tauri/src/snap.rs`.
 export const SNAP_TARGET_ID = "claude-desktop";
@@ -40,4 +41,12 @@ export async function snapUpdate(frame: SnapFrame): Promise<SnapStatus> {
 
 export async function snapDetach(): Promise<SnapStatus> {
   return invoke<SnapStatus>("snap_detach");
+}
+
+export async function listenForSnapEnded(
+  onEnded: (status: SnapStatus) => void,
+): Promise<UnlistenFn> {
+  return listen<SnapStatus>("snap-ended", (event) => {
+    onEnded(event.payload);
+  });
 }
