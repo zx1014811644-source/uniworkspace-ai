@@ -3,6 +3,9 @@ mod partition;
 #[cfg(target_os = "macos")]
 mod partition_mac;
 mod shortcuts;
+mod snap;
+#[cfg(target_os = "macos")]
+mod snap_mac;
 mod window_mac;
 
 use tauri::Manager;
@@ -13,10 +16,15 @@ pub fn run() {
         detector::status(),
         window_mac::status(),
         shortcuts::status(),
+        snap::status(),
     );
     let _ = _placeholders;
 
     let builder = tauri::Builder::default()
+        .setup(|app| {
+            snap::recover_orphans(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             partition::load_workspace,
             partition::save_workspace,
@@ -29,10 +37,14 @@ pub fn run() {
             detector::a11y_request,
             detector::a11y_open_settings,
             detector::a11y_choose,
+            snap::snap_attach,
+            snap::snap_update,
+            snap::snap_detach,
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    snap::restore_for_exit();
                     window.app_handle().exit(0);
                 }
             }
