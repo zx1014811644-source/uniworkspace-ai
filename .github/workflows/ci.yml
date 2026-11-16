@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  macos-unsigned-debug:
+    name: macOS unsigned debug build
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check catalog
+        run: pnpm catalog:check
+
+      - name: Build unsigned macOS debug app
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+        run: pnpm tauri build --debug --bundles app --no-sign
+
+      - name: Require an unsigned app bundle
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target/debug/bundle/macos -name '*.app' -type d -print -quit)
+          if [[ -z "${APP}" ]]; then
+            echo "No debug .app was produced"
+            exit 1
+          fi
+          echo "App: ${APP}"
+          codesign -dv "${APP}" > /tmp/codesign.txt 2>&1 || true
+          cat /tmp/codesign.txt
+          if grep -E -q 'Authority=|Developer ID|Apple Development' /tmp/codesign.txt; then
+            echo "Debug app must not carry an Apple signing identity"
+            exit 1
+          fi
+          if ! grep -E -q 'not signed|Signature=adhoc' /tmp/codesign.txt; then
+            echo "Debug app must be unsigned or only linker-signed"
+            exit 1
+          fi
+          if grep -q 'Signature=adhoc' /tmp/codesign.txt; then
+            grep -q 'linker-signed' /tmp/codesign.txt
+            grep -q 'TeamIdentifier=not set' /tmp/codesign.txt
+          fi
+
+      - name: Archive the unsigned app
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target/debug/bundle/macos -name '*.app' -type d -print -quit)
+          ditto -c -k --keepParent "${APP}" uniworkspace-ai-macos-debug.zip
+          mode=$(zipinfo uniworkspace-ai-macos-debug.zip | awk '/Contents\/MacOS\// && $1 ~ /^-/ { print $1; exit }')
+          echo "Main executable mode in archive: ${mode}"
+          case "${mode}" in
+            -??x*) ;;
+            *)
+              echo "Archive lost the executable bit on the app binary"
+              exit 1
+              ;;
+          esac
+
+      - name: Upload unsigned debug app
+        uses: actions/upload-artifact@v4
+        with:
+          name: uniworkspace-ai-macos-debug
+          path: uniworkspace-ai-macos-debug.zip
+          if-no-files-found: error
