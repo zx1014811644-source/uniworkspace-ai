@@ -414,6 +414,18 @@ pub fn follow_display(host_display: Option<u32>, link_display: Option<u32>) -> D
     }
 }
 
+/// A display that already failed to create a link must not be retried on every
+/// vsync once follow has a link or the 60fps timer. A different display gets
+/// one new attempt. If neither source is running, try again.
+pub fn skip_repeated_display_link(
+    attempted: Option<u32>,
+    display: u32,
+    link_running: bool,
+    timer_running: bool,
+) -> bool {
+    attempted == Some(display) && (link_running || timer_running)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameWrite {
     pub position: Option<(f64, f64)>,
@@ -1174,6 +1186,11 @@ mod tests {
         assert_eq!(follow_display(Some(5), None), DisplayLinkPlan::Retarget(5));
         assert_eq!(follow_display(None, Some(3)), DisplayLinkPlan::Keep);
         assert_eq!(follow_display(None, None), DisplayLinkPlan::Keep);
+        assert!(skip_repeated_display_link(Some(5), 5, false, true));
+        assert!(skip_repeated_display_link(Some(5), 5, true, false));
+        assert!(!skip_repeated_display_link(Some(5), 5, false, false));
+        assert!(!skip_repeated_display_link(Some(5), 8, false, true));
+        assert!(!skip_repeated_display_link(None, 5, false, true));
     }
 
     #[test]
