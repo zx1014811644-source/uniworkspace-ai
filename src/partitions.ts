@@ -1,15 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { runningInTauri } from "./window";
-import type { CatalogApp } from "./types";
 
-export const WEEK2_IDS = ["chatgpt", "claude", "gemini", "kimi"] as const;
-
-export interface PartitionBounds {
+export interface PaneSpec {
   appId: string;
+  url: string;
   x: number;
   y: number;
   width: number;
   height: number;
+  focus: boolean;
 }
 
 export interface ProbeSample {
@@ -27,12 +27,9 @@ export interface ProbeReport {
   samples: ProbeSample[];
 }
 
-export function isWeek2Web(app: CatalogApp): app is CatalogApp & { webUrl: string } {
-  return (
-    app.kind === "web" &&
-    (WEEK2_IDS as readonly string[]).includes(app.id) &&
-    typeof app.webUrl === "string"
-  );
+export interface PaneNotice {
+  appId: string;
+  message: string;
 }
 
 export function errorText(error: unknown): string {
@@ -45,31 +42,18 @@ export function errorText(error: unknown): string {
   return "打不开这个分区";
 }
 
-export async function showPartition(input: PartitionBounds & { url: string }): Promise<void> {
+export async function syncPanes(panes: PaneSpec[]): Promise<void> {
   if (!runningInTauri()) {
     return;
   }
-  await invoke("show_partition", {
-    appId: input.appId,
-    url: input.url,
-    x: input.x,
-    y: input.y,
-    width: input.width,
-    height: input.height,
-  });
+  await invoke("sync_panes", { panes });
 }
 
-export async function setPartitionBounds(bounds: PartitionBounds): Promise<void> {
+export async function focusPartition(appId: string): Promise<void> {
   if (!runningInTauri()) {
     return;
   }
-  await invoke("set_partition_bounds", {
-    appId: bounds.appId,
-    x: bounds.x,
-    y: bounds.y,
-    width: bounds.width,
-    height: bounds.height,
-  });
+  await invoke("focus_partition", { appId });
 }
 
 export async function hidePartitions(): Promise<void> {
@@ -81,4 +65,20 @@ export async function hidePartitions(): Promise<void> {
 
 export async function probePartitions(): Promise<ProbeReport> {
   return invoke<ProbeReport>("probe_partitions");
+}
+
+export async function listenForPaneNotices(
+  onRebuilt: (notice: PaneNotice) => void,
+  onFailed: (notice: PaneNotice) => void,
+): Promise<UnlistenFn> {
+  const rebuilt = await listen<PaneNotice>("pane-rebuilt", (event) => {
+    onRebuilt(event.payload);
+  });
+  const failed = await listen<PaneNotice>("pane-rebuild-failed", (event) => {
+    onFailed(event.payload);
+  });
+  return () => {
+    rebuilt();
+    failed();
+  };
 }

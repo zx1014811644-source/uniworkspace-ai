@@ -16,10 +16,12 @@ pub fn run() {
     );
     let _ = _placeholders;
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            partition::show_partition,
-            partition::set_partition_bounds,
+            partition::load_workspace,
+            partition::save_workspace,
+            partition::sync_panes,
+            partition::focus_partition,
             partition::hide_partitions,
             partition::probe_partitions,
         ])
@@ -29,7 +31,17 @@ pub fn run() {
                     window.app_handle().exit(0);
                 }
             }
-        })
+        });
+
+    // Tauri 2.12 exposes this per webview on the app builder. The handler
+    // receives the webview whose content process died, so one pane can be
+    // rebuilt without reloading the others.
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        partition_mac::handle_content_process_terminated(webview);
+    });
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running UniWorkspace AI");
 }

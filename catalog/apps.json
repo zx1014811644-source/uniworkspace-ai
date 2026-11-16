@@ -79,7 +79,7 @@
       "bundleId": null,
       "bundleIdStatus": "not-applicable",
       "processNames": [],
-      "notes": "Official product pages are https://www.accio.com/work/ and https://zh.accio.com/work. Alibaba's quick start says a web version exists, but no stable app URL distinct from those pages was confirmed. The desktop bundle id is also pending on accio-work-desktop."
+      "notes": "Official product pages are https://www.accio.com/work/ and https://zh.accio.com/work. Alibaba's quick start says a web version exists, but no stable app URL distinct from those pages was confirmed. The desktop bundle id is also pending on accio-work-desktop. Week 3 leaves this pending: it does not open a WebView and does not block M1."
     },
     {
       "id": "cursor",
@@ -90,7 +90,7 @@
       "bundleId": null,
       "bundleIdStatus": "not-applicable",
       "processNames": [],
-      "notes": "No stable official in-browser editor was found. https://cursor.com/ and https://cursor.com/download are the product and download sites. The desktop client is cursor-desktop."
+      "notes": "No stable official in-browser editor was found. https://cursor.com/ and https://cursor.com/download are the product and download sites. The desktop client is cursor-desktop. Week 3 leaves the web entry pending and desktop-only: it does not open a WebView. The confirmed desktop bundle id stays on cursor-desktop."
     },
     {
       "id": "deepseek",
@@ -112,7 +112,7 @@
       "bundleId": null,
       "bundleIdStatus": "not-applicable",
       "processNames": [],
-      "notes": "DeepSeek Harness (https://www.deepseek.com/harness/). The product page says it runs as a desktop app or a local web UI started from code; no stable hosted web app URL was confirmed. This is not tryharness.ai and not harness.io. The desktop bundle id is pending on harness-desktop."
+      "notes": "DeepSeek Harness (https://www.deepseek.com/harness/). The product page says it runs as a desktop app or a local web UI started from code; no stable hosted web app URL was confirmed. This is not tryharness.ai and not harness.io. The desktop bundle id is pending on harness-desktop. Week 3 leaves this pending and desktop-only: it does not open a WebView and does not block M1."
     },
     {
       "id": "chatgpt-desktop",

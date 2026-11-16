@@ -1,8 +1,10 @@
 # UniWorkspace AI
 
-个人使用的本地 macOS AI 工作台。Week 1 只交付空壳：自定义标题栏、侧栏占位和内容区。不调用第三方 AI 接口，也不迁移已有登录数据。
+个人使用的本地 macOS AI 工作台。Week 3 把已确认的网页放进可恢复的分屏：侧栏切换、单窗 / 1:1 / 田字格，登录态按应用隔开并在重启后还在。不调用第三方 AI 接口，也不迁移各家客户端里已经登录的数据。
 
 最低系统版本是 macOS 13。
+
+在 Mac 上核对登录、分屏和单个 WebView 崩溃，按 `docs/week3-m1.md`。
 
 ## 在 Mac 上开发
 
@@ -43,16 +45,44 @@ pnpm catalog:check
 
 ## 分区
 
-Week 2 在内容区打开目录里的 ChatGPT、Claude、Gemini 和 Kimi。每个应用一个持久的 WKWebsiteDataStore，cookie 和 localStorage 不共享。macOS 14 及以上用 `dataStoreForIdentifier`；macOS 13 没有这套公开 API，改用按应用目录配置的持久仓库，不用内存仓库。决定写在 `docs/week2-partition-decision.md`。
+已确认的网页各用一个持久的 WKWebsiteDataStore，cookie 和 localStorage 不共享。macOS 14 及以上用 `dataStoreForIdentifier`；macOS 13 没有这套公开 API，改用按应用目录配置的持久仓库，不用内存仓库。决定写在 `docs/week2-partition-decision.md`。Week 3 沿用同一套标识，没有把新站点放进内存仓库。
+
+会打开的官方地址：
+
+- ChatGPT `https://chatgpt.com/`
+- Claude `https://claude.ai/`
+- Gemini `https://gemini.google.com/`
+- Kimi `https://www.kimi.com/`
+- 豆包 `https://www.doubao.com/chat/`
+- WorkBuddy `https://www.workbuddy.cn/app`
+- DeepSeek `https://chat.deepseek.com/`
+
+Accio Work、Cursor、Harness 没有稳定的官方网页入口，侧栏标成「不打开」，不会猜地址。WorkBuddy、Accio Work、Harness 的桌面 Bundle ID 仍是空的。
+
+手动添加的链接使用 `custom-<uuid>` 分区，和目录里的站点分开，并且写进同一份本地配置。
 
 登录用的 `window.open` 会开一个独立窗口，并沿用当前分区的数据仓库。
 
-其余网页和全部桌面应用仍然只标出位置。辅助功能和吸附只做了调研，见 `docs/week2-a11y-placeholder-research.md`，没有跟随窗口。
+在 Mac 上检查这些分区有没有串数据：运行 `pnpm tauri dev`，点侧栏底部的「检查隔离」。它会在每个已确认站点的仓库里打开同一个 `127.0.0.1` 页面，分别写入 cookie 和 localStorage，再读回来比对。浏览器里的 `pnpm dev` 没有这些 WebView。
 
-在 Mac 上检查四个分区有没有串数据：运行 `pnpm tauri dev`，点侧栏底部的「检查隔离」。它会在四个仓库里打开同一个 `127.0.0.1` 页面，分别写入 cookie 和 localStorage，再读回来比对。浏览器里的 `pnpm dev` 没有这些 WebView。
+## 布局
+
+内容区可以是单窗、左右 1:1，或田字格。点一格，再点侧栏里的网页，就把那个网页放进这一格。同一个网页不会同时出现在两格。
+
+布局、每一格里的应用，以及自定义链接写在：
+
+`~/Library/Application Support/com.uniworkspace.ai/workspace.json`
+
+退出时用窗口左上角的关闭按钮，让进程结束。再次 `pnpm tauri dev` 会读回这份文件，并用原来的分区打开原来的网页，所以登录态还在。步骤见 `docs/week3-m1.md`。
+
+## 单个 WebView 崩溃
+
+某个分区的网页内容进程结束时，只关闭并按原来的分区、网址和位置重建那一格。其他格子不关闭、不重新加载。壳本身或登录弹窗如果崩溃，只重新载入那一个 WebView。
+
+Tauri 2.12 的 `WebviewBuilder` 还没有单独的崩溃回调，应用级的 `on_web_content_process_terminate` 会带上崩溃的那个 WebView。恢复按这个 WebView 的标签决定，不缩小已确认站点的范围。
 
 ## 本周范围
 
-`src/` 是 React 壳，内容区可以盖上上述四个分区 WebView。`detector` 和 `shortcuts` 仍是占位。`window_mac` 只加了以后做吸附的注释，没有调用辅助功能。
+`src/` 是 React 壳。`detector` 和 `shortcuts` 仍是占位。`window_mac` 只保留以后做吸附的注释，没有调用辅助功能，也没有开始几何吸附、热键或公证。
 
-本周不包含其余六个网页、分屏、重启后的登录恢复界面、窗口吸附、全局热键，或其他平台的窗口嵌入。
+本周不包含 Windows、Linux，也不包含给 Accio Work、Cursor、Harness 编造网页地址。

@@ -52,3 +52,5 @@ cookie 和 localStorage 按来源隔离。四个站点的域名本来就不同�
 逻辑判定在 `partition::isolation_failure`，`cargo test --lib` 会跑共享仓库和 cookie 串数据的失败样本，也会核对四个 UUID 稳定且互不相同。CI 在 macOS 任务里跑这些测试。现场的 WebKit 读写要在 Mac 上点「检查隔离」，Linux 上的浏览器预览没有这些 WebView。
 
 通过之后，侧栏会列出每个分区的标记，以及仓库在磁盘上的位置。正式打开过站点之后，`~/Library/Application Support/com.uniworkspace.ai/partitions/index.json` 里也有同样的 id 和 UUID 对照。macOS 14 及以上还可以对一下 `~/Library/WebKit/com.uniworkspace.ai/WebsiteDataStore/` 下面是不是四个不同的 UUID 目录。
+
+Week 3 继续用这套持久仓库，没有改成内存仓库，也没有把豆包、WorkBuddy、DeepSeek 放进别的存储。分区标识仍然是同一个 UUID v5。验收步骤见 `docs/week3-m1.md`。
