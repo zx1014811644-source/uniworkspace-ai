@@ -117,10 +117,21 @@ for (const id of pendingBundleIds) {
   else if (app.bundleId !== null) fail(`${id} bundleId must stay null`);
 }
 
-const cursorDesktop = catalog.apps.find((entry) => entry.id === "cursor-desktop");
-if (!cursorDesktop) fail("missing cursor-desktop");
-else if (cursorDesktop.bundleId !== "com.todesktop.230313mzl4w4u92") {
-  fail("cursor-desktop bundleId must stay the confirmed value");
+const confirmedBundles = {
+  "chatgpt-desktop": "com.openai.codex",
+  "claude-desktop": "com.anthropic.claudefordesktop",
+  "lm-studio": "ai.elementlabs.lmstudio",
+  "gemini-desktop": "com.google.GeminiMacOS",
+  "kimi-desktop": "com.moonshot.kimichat",
+  "doubao-desktop": "com.bot.pc.doubao",
+  "cursor-desktop": "com.todesktop.230313mzl4w4u92",
+};
+
+for (const [id, bundleId] of Object.entries(confirmedBundles)) {
+  const app = catalog.apps.find((entry) => entry.id === id);
+  if (!app) fail(`missing ${id}`);
+  else if (app.bundleId !== bundleId) fail(`${id} bundleId must stay ${bundleId}`);
+  else if (app.bundleIdStatus !== "confirmed") fail(`${id} must stay confirmed`);
 }
 
 for (const id of webIds) {

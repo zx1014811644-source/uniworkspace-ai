@@ -3,12 +3,14 @@ import { errorText, syncPanes, type PaneSpec } from "../partitions";
 import { useShellStore } from "../store";
 import { runningInTauri } from "../window";
 import { embedTarget, visibleCount, type LayoutMode } from "../workspace";
+import { AccessibilityBanner } from "./AccessibilityBanner";
 
 export function ContentArea() {
   const ready = useShellStore((state) => state.ready);
 
   return (
     <main className="flex min-w-0 flex-1 flex-col bg-shell-canvas">
+      <AccessibilityBanner />
       {ready ? <PaneGrid /> : <LoadingState />}
     </main>
   );
