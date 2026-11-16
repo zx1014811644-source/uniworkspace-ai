@@ -240,7 +240,7 @@ function Pane({
     >
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-shell-line bg-white px-2">
         <span className="truncate text-xs font-medium">
-          {snap ? "Claude Desktop" : target?.name ?? "空格"}
+          {snap ? snap.name || "桌面应用" : target?.name ?? "空格"}
         </span>
         {note && !snap ? (
           <span className="truncate text-[11px] text-shell-accent">{note}</span>
@@ -277,7 +277,7 @@ function Pane({
       >
         {embedded ? (
           <div className="pointer-events-none flex h-full w-full items-start justify-center rounded-sm border border-dashed border-shell-line pt-3 text-xs">
-            透明占位。Claude Desktop 会对齐到这块区域。
+            透明占位。{snap?.name || "这个窗口"} 会对齐到这块区域。
           </div>
         ) : snap ? (
           snap.message

@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/// Must match `SNAP_TARGET_ID` in `src-tauri/src/snap.rs`.
-export const SNAP_TARGET_ID = "claude-desktop";
+/// Confirmed desktop apps are the only snap targets. The Rust side checks the
+/// same catalog ids in `is_snap_target`.
 
 export type SnapMode = "inactive" | "embedded" | "sideBySide";
 

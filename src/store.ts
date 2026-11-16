@@ -12,7 +12,6 @@ import {
 } from "./desktop";
 import { errorText, focusPartition } from "./partitions";
 import {
-  SNAP_TARGET_ID,
   snapAttach,
   snapDetach,
   snapUpdate,
@@ -78,10 +77,11 @@ interface ShellState {
   chooseA11y: (choice: A11yChoice) => Promise<void>;
   snap: LiveSnap | null;
   snapRequest: number | null;
+  snapTargetId: string | null;
   snapBusy: boolean;
   snapError: string | null;
   snapNote: string | null;
-  askSnap: () => void;
+  askSnap: (appId: string) => void;
   attachSnap: (paneIndex: number, frame: SnapFrame) => Promise<void>;
   updateSnapFrame: (frame: SnapFrame) => Promise<void>;
   detachSnap: () => Promise<void>;
@@ -90,6 +90,7 @@ interface ShellState {
 
 export interface LiveSnap {
   appId: string;
+  name: string;
   paneIndex: number;
   mode: Exclude<SnapMode, "inactive">;
   message: string;
@@ -210,6 +211,7 @@ export const useShellStore = create<ShellState>((set, get) => {
     a11yError: null,
     snap: null,
     snapRequest: null,
+    snapTargetId: null,
     snapBusy: false,
     snapError: null,
     snapNote: null,
@@ -444,37 +446,63 @@ export const useShellStore = create<ShellState>((set, get) => {
         set({ a11yError: errorText(reason) });
       }
     },
-    askSnap: () => {
-      set({ snapRequest: get().focusedPane, snapError: null, snapNote: null });
+    askSnap: (appId) => {
+      set({
+        snapRequest: get().focusedPane,
+        snapTargetId: appId,
+        snapError: null,
+        snapNote: null,
+      });
     },
     attachSnap: (paneIndex, frame) =>
       enqueueSnap(async () => {
+        const appId = get().snapTargetId;
         set({ snapBusy: true, snapRequest: null, snapError: null });
+        if (!appId) {
+          set({ snapBusy: false, snapTargetId: null });
+          return;
+        }
+        const superseded = () => {
+          const newer = get().snapTargetId;
+          return newer !== null && newer !== appId;
+        };
         try {
-          const status = await snapAttach(SNAP_TARGET_ID, frame);
+          const status = await snapAttach(appId, frame);
+          if (superseded()) {
+            set({ snapBusy: false });
+            return;
+          }
           if (!status.active || status.mode === "inactive") {
             set({
               snap: null,
               snapBusy: false,
+              snapTargetId: null,
               snapError: status.message,
             });
             return;
           }
           set({
             snap: {
-              appId: SNAP_TARGET_ID,
+              appId: status.targetAppId || appId,
+              name: status.targetName,
               paneIndex,
               mode: status.mode,
               message: status.message ?? "",
             },
             snapBusy: false,
+            snapTargetId: null,
             snapNote: null,
           });
         } catch (reason: unknown) {
+          if (superseded()) {
+            set({ snapBusy: false });
+            return;
+          }
           set({
             snap: null,
             snapBusy: false,
             snapRequest: null,
+            snapTargetId: null,
             snapError: errorText(reason),
           });
         }
@@ -495,10 +523,15 @@ export const useShellStore = create<ShellState>((set, get) => {
             set({ snap: null, snapError: status.message });
             return;
           }
-          if (status.mode !== latest.mode || (status.message ?? "") !== latest.message) {
+          if (
+            status.mode !== latest.mode ||
+            (status.message ?? "") !== latest.message ||
+            (status.targetName && status.targetName !== latest.name)
+          ) {
             set({
               snap: {
                 ...latest,
+                name: status.targetName || latest.name,
                 mode: status.mode,
                 message: status.message ?? "",
               },
@@ -532,6 +565,7 @@ export const useShellStore = create<ShellState>((set, get) => {
       set({
         snap: null,
         snapRequest: null,
+        snapTargetId: null,
         snapNote: null,
         snapError: status.message,
       });
