@@ -124,6 +124,8 @@ pub(crate) struct RawWindow {
     pub layer: i32,
     pub on_screen: bool,
     pub alpha: f64,
+    pub x: f64,
+    pub y: f64,
     pub width: f64,
     pub height: f64,
 }
@@ -588,6 +590,8 @@ mod tests {
             layer: 0,
             on_screen: true,
             alpha: 1.0,
+            x: 0.0,
+            y: 0.0,
             width: 800.0,
             height: 600.0,
         }
