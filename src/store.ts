@@ -648,7 +648,10 @@ export const useShellStore = create<ShellState>((set, get) => {
           shortcutError: status.error,
         });
       } catch (reason: unknown) {
-        set({ shortcutError: errorText(reason) });
+        const message = errorText(reason);
+        await get().resumeShortcut();
+        const restored = get().shortcutError;
+        set({ shortcutError: restored ?? message });
       }
     },
     suspendShortcut: async () => {

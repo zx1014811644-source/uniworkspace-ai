@@ -116,8 +116,10 @@ fn format_with_key(parts: &[&str], key: &str) -> String {
     owned.join("+")
 }
 
-pub fn key_code(key: Key) -> u32 {
-    match key {
+/// `None` means the key is not a virtual key we register.
+/// `Some(0)` is valid: ANSI A is virtual key code 0.
+pub fn key_code(key: Key) -> Option<u32> {
+    Some(match key {
         Key::Space => 0x31,
         Key::Digit('0') => 0x1D,
         Key::Digit('1') => 0x12,
@@ -129,7 +131,7 @@ pub fn key_code(key: Key) -> u32 {
         Key::Digit('7') => 0x1A,
         Key::Digit('8') => 0x1C,
         Key::Digit('9') => 0x19,
-        Key::Digit(_) => 0,
+        Key::Digit(_) => return None,
         Key::Letter('A') => 0x00,
         Key::Letter('B') => 0x0B,
         Key::Letter('C') => 0x08,
@@ -156,8 +158,8 @@ pub fn key_code(key: Key) -> u32 {
         Key::Letter('X') => 0x07,
         Key::Letter('Y') => 0x10,
         Key::Letter('Z') => 0x06,
-        Key::Letter(_) => 0,
-    }
+        Key::Letter(_) => return None,
+    })
 }
 
 /// Carbon modifier flags understood by `RegisterEventHotKey`.
@@ -246,7 +248,7 @@ pub fn parse_chord(raw: &str) -> Result<Chord, String> {
     let Some(key) = key else {
         return Err("快捷键还缺主键".into());
     };
-    if key_code(key) == 0 {
+    if key_code(key).is_none() {
         return Err("这个主键不能用作全局热键".into());
     }
     Ok(Chord {
@@ -540,10 +542,9 @@ mod macos {
         if !chord.has_command_modifier() {
             return Err("快捷键至少要带 Control、Option 或 Command。".into());
         }
-        let code = key_code(chord.key);
-        if code == 0 {
+        let Some(code) = key_code(chord.key) else {
             return Err("这个主键不能用作全局热键".into());
-        }
+        };
         ensure_handler()?;
         unregister_current();
         let mut hotkey = std::ptr::null_mut();
@@ -766,6 +767,10 @@ mod macos {
             Ok(current_status())
         })?
     }
+
+    pub(super) fn restore_saved(app: &AppHandle) -> Result<ShortcutStatus, String> {
+        set_capture(app, false)
+    }
 }
 
 async fn off_main<T: Send + 'static>(
@@ -776,6 +781,18 @@ async fn off_main<T: Send + 'static>(
         .map_err(|err| format!("后台任务中断: {err}"))
 }
 
+async fn restore_after_rejected_capture(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let app = app.clone();
+        let _ = off_main(move || macos::restore_saved(&app)).await;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+    }
+}
+
 #[tauri::command]
 pub fn shortcut_status() -> ShortcutStatus {
     current_status()
@@ -783,7 +800,15 @@ pub fn shortcut_status() -> ShortcutStatus {
 
 #[tauri::command]
 pub async fn shortcut_set(app: AppHandle, accelerator: String) -> Result<ShortcutStatus, String> {
-    let chord = parse_accelerator(&accelerator)?;
+    let chord = match parse_accelerator(&accelerator) {
+        Ok(chord) => chord,
+        Err(message) => {
+            // Capture already unregistered the working hotkey. A rejected
+            // chord never reaches registration, so put the previous one back.
+            restore_after_rejected_capture(&app).await;
+            return Err(message);
+        }
+    };
     #[cfg(target_os = "macos")]
     {
         off_main(move || macos::set_chord(&app, chord)).await?
@@ -825,14 +850,17 @@ mod tests {
         let chord = parse_accelerator("Option+Space").unwrap();
         assert_eq!(chord, default_chord());
         assert_eq!(format_chord(&chord), "Option+Space");
-        assert_eq!(key_code(chord.key), 0x31);
+        assert_eq!(key_code(chord.key), Some(0x31));
         assert_eq!(carbon_modifiers(&chord), 1 << 11);
         assert!(system_conflict(&chord).is_none());
         let changed = parse_accelerator("ctrl+shift+k").unwrap();
         assert!(changed.control && changed.shift && !changed.option && !changed.command);
         assert_eq!(changed.key, Key::Letter('K'));
         assert_eq!(format_chord(&changed), "Control+Shift+K");
-        assert_eq!(key_code(changed.key), 0x28);
+        assert_eq!(key_code(changed.key), Some(0x28));
+        let with_a = parse_accelerator("Control+Shift+A").unwrap();
+        assert_eq!(with_a.key, Key::Letter('A'));
+        assert_eq!(key_code(with_a.key), Some(0x00));
         assert_eq!(carbon_modifiers(&changed), (1 << 12) | (1 << 9));
     }
 

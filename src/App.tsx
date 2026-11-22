@@ -3,7 +3,7 @@ import { ContentArea } from "./components/ContentArea";
 import { Sidebar } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
 import { desktopScan, scanWait } from "./desktop";
-import { errorText, listenForPaneNotices } from "./partitions";
+import { errorText, listenForPaneActivation, listenForPaneNotices } from "./partitions";
 import { listenForSnapEnded } from "./snap";
 import { useShellStore } from "./store";
 import { runningInTauri } from "./window";
@@ -37,6 +37,31 @@ export default function App() {
       unlisten?.();
     };
   }, [notePane]);
+
+  useEffect(() => {
+    if (!runningInTauri()) {
+      return;
+    }
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listenForPaneActivation((appId) => {
+      const state = useShellStore.getState();
+      const index = state.slots.findIndex((slot) => slot === appId);
+      if (index >= 0 && index !== state.focusedPane && index < state.slots.length) {
+        void state.focusPane(index);
+      }
+    }).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!runningInTauri()) {

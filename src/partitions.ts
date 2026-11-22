@@ -82,3 +82,13 @@ export async function listenForPaneNotices(
     failed();
   };
 }
+
+export async function listenForPaneActivation(
+  onActivate: (appId: string) => void,
+): Promise<UnlistenFn> {
+  return listen<{ appId: string }>("pane-activated", (event) => {
+    if (event.payload.appId) {
+      onActivate(event.payload.appId);
+    }
+  });
+}

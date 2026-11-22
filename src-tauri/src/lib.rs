@@ -25,6 +25,8 @@ pub fn run() {
             detector::refresh_web_only_cache(app.handle());
             snap::recover_orphans(app.handle());
             shortcuts::install(app.handle());
+            #[cfg(target_os = "macos")]
+            partition_mac::install_activation_monitor(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

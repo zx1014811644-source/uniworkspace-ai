@@ -12,10 +12,11 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
+use objc2::encode::{Encode, Encoding, RefEncode};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
 use objc2::{msg_send, ClassType, MainThreadMarker};
@@ -31,8 +32,9 @@ use url::Url;
 use crate::partition::{
     authorize_panes, backend_detail, backend_name, default_workspace, identifier_string,
     isolation_failure, official_site, pane_should_freeze, parse_marker, partition_identifier,
-    plan_pane_crash, read_workspace, site_label, storage_hint, store_kind_for_major, OpenPane,
-    PaneSpec, PartitionStoreKind, ProbeReport, ProbeSample, RebuildGate, OFFICIAL_SITES,
+    plan_pane_crash, read_workspace, resolve_pane_focus, site_label, storage_hint,
+    store_kind_for_major, OpenPane, PaneSpec, PartitionStoreKind, ProbeReport, ProbeSample,
+    RebuildGate, OFFICIAL_SITES,
 };
 
 static OAUTH_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -44,8 +46,27 @@ static GATES: LazyLock<Mutex<HashMap<String, RebuildGate>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static FOCUSED_LABEL: Mutex<String> = Mutex::new(String::new());
 static SHELL_VISIBLE: AtomicBool = AtomicBool::new(true);
+static NATIVE_FOCUS_AT: AtomicU64 = AtomicU64::new(0);
 static FROZEN: LazyLock<Mutex<HashMap<String, bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static VIEW_LABELS: LazyLock<Mutex<HashMap<usize, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const NATIVE_FOCUS_FRESH_MS: u128 = 800;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NsPoint {
+    x: f64,
+    y: f64,
+}
+
+unsafe impl Encode for NsPoint {
+    const ENCODING: Encoding = Encoding::Struct("_NSPoint", &[f64::ENCODING, f64::ENCODING]);
+}
+
+unsafe impl RefEncode for NsPoint {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
 
 #[derive(Clone)]
 struct LivePane {
@@ -123,15 +144,19 @@ fn request_freeze(app: &AppHandle, label: &str, freeze: bool) {
                 .get(&label)
                 .copied()
                 .unwrap_or(freeze);
-            apply_page_freeze(platform.inner(), desired);
+            apply_page_freeze(platform.inner(), &label, desired);
         });
     });
 }
 
-fn apply_page_freeze(view: *mut std::ffi::c_void, freeze: bool) {
+fn apply_page_freeze(view: *mut std::ffi::c_void, label: &str, freeze: bool) {
     if view.is_null() {
         return;
     }
+    VIEW_LABELS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(view as usize, label.to_string());
     let view = view as *mut AnyObject;
     let page_sel = if freeze {
         objc2::runtime::Sel::register(c"_suspendPage:")
@@ -166,16 +191,138 @@ fn apply_page_freeze(view: *mut std::ffi::c_void, freeze: bool) {
     }
 }
 
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn wk_ancestor(mut view: *mut AnyObject) -> Option<*mut AnyObject> {
+    let class = AnyClass::get(c"WKWebView")?;
+    let mut depth = 0;
+    while !view.is_null() && depth < 32 {
+        let is_webview: bool = unsafe { msg_send![view, isKindOfClass: class] };
+        if is_webview {
+            return Some(view);
+        }
+        view = unsafe { msg_send![view, superview] };
+        depth += 1;
+    }
+    None
+}
+
+fn activate_clicked_partition(app: &AppHandle, event: *mut AnyObject) {
+    let window: *mut AnyObject = unsafe { msg_send![event, window] };
+    if window.is_null() {
+        return;
+    }
+    let point: NsPoint = unsafe { msg_send![event, locationInWindow] };
+    let content: *mut AnyObject = unsafe { msg_send![window, contentView] };
+    if content.is_null() {
+        return;
+    }
+    let hit: *mut AnyObject = unsafe { msg_send![content, hitTest: point] };
+    let Some(webview) = wk_ancestor(hit) else {
+        return;
+    };
+    let label = VIEW_LABELS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(&(webview as usize))
+        .cloned();
+    let Some(label) = label else {
+        return;
+    };
+    let already = focused_label_is(&label);
+    let frozen = FROZEN
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(&label)
+        .copied()
+        .unwrap_or(false);
+    if already && !frozen {
+        return;
+    }
+    let previous = {
+        let mut focused = FOCUSED_LABEL.lock().unwrap_or_else(|err| err.into_inner());
+        let previous = focused.clone();
+        *focused = label.clone();
+        previous
+    };
+    NATIVE_FOCUS_AT.store(
+        u64::try_from(now_ms()).unwrap_or(u64::MAX),
+        Ordering::Release,
+    );
+    if !previous.is_empty() && previous != label {
+        request_freeze(app, &previous, true);
+    }
+    request_freeze(
+        app,
+        &label,
+        pane_should_freeze(true, SHELL_VISIBLE.load(Ordering::Acquire)),
+    );
+    if let Some(app_id) = label.strip_prefix("partition-") {
+        let _ = app.emit(
+            "pane-activated",
+            PaneNotice {
+                app_id: app_id.to_string(),
+                message: String::new(),
+            },
+        );
+    }
+}
+
+pub fn install_activation_monitor(app: &AppHandle) {
+    static HOST: OnceLock<AppHandle> = OnceLock::new();
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let _ = HOST.set(app.clone());
+    ONCE.call_once(|| {
+        let block = RcBlock::new(|event: *mut AnyObject| -> *mut AnyObject {
+            if !event.is_null() {
+                if let Some(host) = HOST.get() {
+                    activate_clicked_partition(host, event);
+                }
+            }
+            event
+        });
+        let block = Box::leak(Box::new(block));
+        if let Some(class) = AnyClass::get(c"NSEvent") {
+            let mask: u64 = 1 << 1;
+            let handler = RcBlock::as_ptr(block);
+            let _: *mut AnyObject = unsafe {
+                msg_send![
+                    class,
+                    addLocalMonitorForEventsMatchingMask: mask,
+                    handler: handler
+                ]
+            };
+        }
+    });
+}
+
 pub fn sync_panes(app: AppHandle, panes: Vec<PaneSpec>) -> Result<(), String> {
     let workspace = read_workspace(&app)?;
     let opened = authorize_panes(&panes, &workspace)?;
     let kind = current_store_kind()?;
+    let requested = opened
+        .iter()
+        .find(|pane| pane.focus)
+        .map(|pane| site_label(&pane.app_id));
+    let native = FOCUSED_LABEL
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    let age = now_ms().saturating_sub(u128::from(NATIVE_FOCUS_AT.load(Ordering::Acquire)));
+    let chosen = resolve_pane_focus(requested.as_deref(), &native, age, NATIVE_FOCUS_FRESH_MS);
     let mut errors = Vec::new();
     let mut visible_labels = Vec::new();
     for pane in &opened {
+        let mut pane = pane.clone();
         let label = site_label(&pane.app_id);
+        pane.focus = chosen.as_deref() == Some(label.as_str());
         visible_labels.push(label);
-        if let Err(err) = ensure_visible(&app, pane, kind) {
+        if let Err(err) = ensure_visible(&app, &pane, kind) {
             errors.push(err);
         }
     }
@@ -404,6 +551,10 @@ fn close_label(app: &AppHandle, label: &str) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .remove(label);
+    VIEW_LABELS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .retain(|_, value| value != label);
     let Some(webview) = app.get_webview(label) else {
         return Ok(());
     };
@@ -427,6 +578,7 @@ fn focus_once(app: &AppHandle, webview: &tauri::Webview, label: &str) -> Result<
         let previous = focused.clone();
         webview.set_focus().map_err(|err| err.to_string())?;
         *focused = label.to_string();
+        NATIVE_FOCUS_AT.store(0, Ordering::Release);
         previous
     };
     if !previous.is_empty() && previous != label {
