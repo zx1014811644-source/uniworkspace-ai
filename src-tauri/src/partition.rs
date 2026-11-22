@@ -372,6 +372,12 @@ pub fn authorize_panes(
     Ok(opened)
 }
 
+/// The focused pane runs only while the shell window is visible.
+/// Every other web pane stays frozen so inactive AI pages do not keep spinning.
+pub fn pane_should_freeze(focused: bool, shell_visible: bool) -> bool {
+    !shell_visible || !focused
+}
+
 /// A crashed partition webview is the only pane that gets rebuilt.
 /// The shell, login popups, and every other open pane stay as they are.
 pub fn plan_pane_crash(crashed_label: &str, open_labels: &[String]) -> PaneCrashPlan {
@@ -514,6 +520,14 @@ fn sample(app_id: &str, local_storage: &str, cookie: &str) -> ProbeSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inactive_panes_freeze_and_the_focused_pane_runs_only_while_shown() {
+        assert!(!pane_should_freeze(true, true));
+        assert!(pane_should_freeze(false, true));
+        assert!(pane_should_freeze(true, false));
+        assert!(pane_should_freeze(false, false));
+    }
 
     #[test]
     fn partition_identifiers_are_stable_distinct_and_not_nil() {

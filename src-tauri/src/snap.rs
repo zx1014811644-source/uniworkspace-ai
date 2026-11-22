@@ -37,6 +37,14 @@ pub const SIDE_GAP: f64 = 12.0;
 pub const SIDE_MIN_ROOM: f64 = 320.0;
 pub const MIN_TARGET_EDGE: f64 = 200.0;
 pub const RECOVERY_FILE: &str = "snap-recovery.json";
+/// Week 6 accepts one snapped native window. Week 7 does not raise this.
+pub const NATIVE_SNAP_LIMIT: usize = 1;
+/// A later week may follow more than one native window, and must not pass this.
+pub const NATIVE_SNAP_CEILING: usize = 2;
+
+pub fn can_start_another_native_snap(active: usize) -> bool {
+    active < NATIVE_SNAP_LIMIT
+}
 
 pub fn status() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -218,13 +226,26 @@ pub fn frame_usable(frame: &SnapFrame) -> bool {
 }
 
 /// `None` means attach may continue. A string means do not move the window.
-pub fn rejection(app_id: &str, trusted: bool, running: bool, has_window: bool) -> Option<String> {
+/// `web_only` is the in-app choice. It blocks moves even when Accessibility
+/// is already granted, so 「仅使用网页」 cannot drag a desktop window.
+pub fn rejection(
+    app_id: &str,
+    trusted: bool,
+    web_only: bool,
+    running: bool,
+    has_window: bool,
+) -> Option<String> {
     let Some((_, name, _)) = target_parts(app_id) else {
         return Some(
             "只有目录里已确认 Bundle ID 的桌面应用可以吸附。指定窗口和其他应用不会被移动。"
                 .to_string(),
         );
     };
+    if web_only {
+        return Some(format!(
+            "当前是仅使用网页。需要辅助功能才会吸附。网页分屏可以继续使用，{name} 没有被移动。"
+        ));
+    }
     if !trusted {
         return Some(format!(
             "需要辅助功能才能吸附。网页分屏可以继续使用，{name} 没有被移动。"
@@ -818,7 +839,7 @@ mod tests {
             assert_eq!(found_bundle, bundle);
             assert!(is_snap_target(id), "{id}");
             assert!(confirmed_bundle(bundle), "{bundle}");
-            assert!(rejection(id, true, true, true).is_none(), "{id}");
+            assert!(rejection(id, true, false, true, true).is_none(), "{id}");
         }
         for id in [
             "cursor",
@@ -830,7 +851,7 @@ mod tests {
             "deepseek",
         ] {
             assert!(!is_snap_target(id), "{id}");
-            assert!(rejection(id, true, true, true).is_some(), "{id}");
+            assert!(rejection(id, true, false, true, true).is_some(), "{id}");
         }
         for id in ["workbuddy-desktop", "harness-desktop", "accio-work-desktop"] {
             let app = apps.iter().find(|app| app["id"] == id).unwrap();
@@ -854,22 +875,34 @@ mod tests {
 
     #[test]
     fn refusal_running_and_foreign_windows_do_not_move() {
-        let refused = rejection("claude-desktop", false, true, true).unwrap();
+        let refused = rejection("claude-desktop", false, false, true, true).unwrap();
         assert!(refused.contains("网页分屏"));
         assert!(refused.contains("没有被移动"));
+        assert!(refused.contains("需要辅助功能"));
         assert!(refused.contains("Claude Desktop"));
-        let stopped = rejection("lm-studio", true, false, true).unwrap();
+        assert!(!refused.contains("仅使用网页"));
+        let web_only = rejection("claude-desktop", true, true, true, true).unwrap();
+        assert!(web_only.contains("仅使用网页"));
+        assert!(web_only.contains("没有被移动"));
+        assert!(web_only.contains("需要辅助功能"));
+        assert!(web_only.contains("网页分屏"));
+        let stopped = rejection("lm-studio", true, false, false, true).unwrap();
         assert!(stopped.contains("没有在运行"));
         assert!(stopped.contains("LM Studio"));
-        assert!(rejection("chatgpt-desktop", true, true, false)
+        assert!(rejection("chatgpt-desktop", true, false, true, false)
             .unwrap()
             .contains("没有找到"));
-        let other = rejection("workbuddy-desktop", true, true, true).unwrap();
+        let other = rejection("workbuddy-desktop", true, false, true, true).unwrap();
         assert!(other.contains("指定窗口"));
         assert!(other.contains("不会被移动"));
-        assert!(rejection("harness-desktop", true, true, true).is_some());
-        assert!(rejection("cursor-desktop", true, true, true).is_none());
-        assert!(rejection("claude-desktop", true, true, true).is_none());
+        assert!(rejection("harness-desktop", true, false, true, true).is_some());
+        assert!(rejection("cursor-desktop", true, false, true, true).is_none());
+        assert!(rejection("claude-desktop", true, false, true, true).is_none());
+        assert_eq!(NATIVE_SNAP_LIMIT, 1);
+        assert_eq!(NATIVE_SNAP_CEILING, 2);
+        assert!(NATIVE_SNAP_LIMIT <= NATIVE_SNAP_CEILING);
+        assert!(can_start_another_native_snap(0));
+        assert!(!can_start_another_native_snap(NATIVE_SNAP_LIMIT));
     }
 
     #[test]

@@ -371,7 +371,13 @@ fn attach_here(app: AppHandle, app_id: String, frame: SnapFrame) -> Result<SnapS
     } else {
         0
     };
-    if let Some(message) = rejection(&app_id, trusted, pid > 0, window_id != 0) {
+    if let Some(message) = rejection(
+        &app_id,
+        trusted,
+        crate::detector::web_only_cached(),
+        pid > 0,
+        window_id != 0,
+    ) {
         return Err(message);
     }
     let (_, name, bundle) = target_parts(&app_id)
@@ -710,6 +716,9 @@ fn apply_follow() {
 }
 
 fn apply_follow_inner() {
+    if crate::detector::web_only_cached() {
+        return;
+    }
     let gen = GENERATION.load(Ordering::Acquire);
     let Some((app, mode, pid, window_id, logical, ax_rejected, space_failed, health)) = SESSION
         .with(|slot| {

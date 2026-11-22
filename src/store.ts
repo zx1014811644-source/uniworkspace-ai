@@ -30,6 +30,7 @@ import {
   type WorkspaceFile,
 } from "./workspace";
 import { runningInTauri } from "./window";
+import { shortcutCapture, shortcutSet, shortcutStatus } from "./shortcuts";
 
 interface ShellState {
   ready: boolean;
@@ -86,6 +87,13 @@ interface ShellState {
   updateSnapFrame: (frame: SnapFrame) => Promise<void>;
   detachSnap: () => Promise<void>;
   applySnapEnded: (status: SnapStatus) => void;
+  shortcutAccelerator: string;
+  shortcutRegistered: boolean;
+  shortcutError: string | null;
+  refreshShortcut: () => Promise<void>;
+  setShortcut: (accelerator: string) => Promise<void>;
+  suspendShortcut: () => Promise<void>;
+  resumeShortcut: () => Promise<void>;
 }
 
 export interface LiveSnap {
@@ -215,6 +223,9 @@ export const useShellStore = create<ShellState>((set, get) => {
     snapBusy: false,
     snapError: null,
     snapNote: null,
+    shortcutAccelerator: "Option+Space",
+    shortcutRegistered: false,
+    shortcutError: null,
     boot: async () => {
       try {
         const file = await loadWorkspace();
@@ -260,6 +271,7 @@ export const useShellStore = create<ShellState>((set, get) => {
           a11yError: errorText(reason),
         });
       }
+      await get().refreshShortcut();
     },
     setLayout: async (layout) => {
       const snap = get().snap;
@@ -594,8 +606,80 @@ export const useShellStore = create<ShellState>((set, get) => {
           a11yOpen: status.choice === "pending",
           a11yError: null,
         });
+        if (status.choice === "webOnly" && get().snap) {
+          await get().detachSnap();
+        }
       } catch (reason: unknown) {
         set({ a11yError: errorText(reason) });
+      }
+    },
+    refreshShortcut: async () => {
+      if (!runningInTauri()) {
+        set({
+          shortcutAccelerator: "Option+Space",
+          shortcutRegistered: false,
+          shortcutError: null,
+        });
+        return;
+      }
+      try {
+        const status = await shortcutStatus();
+        set({
+          shortcutAccelerator: status.accelerator,
+          shortcutRegistered: status.registered,
+          shortcutError: status.error,
+        });
+      } catch (reason: unknown) {
+        set({ shortcutError: errorText(reason) });
+      }
+    },
+    setShortcut: async (accelerator) => {
+      if (!runningInTauri()) {
+        set({
+          shortcutError: "全局热键要在 macOS 应用里注册。网页工作台可以继续使用。",
+        });
+        return;
+      }
+      try {
+        const status = await shortcutSet(accelerator);
+        set({
+          shortcutAccelerator: status.accelerator,
+          shortcutRegistered: status.registered,
+          shortcutError: status.error,
+        });
+      } catch (reason: unknown) {
+        set({ shortcutError: errorText(reason) });
+      }
+    },
+    suspendShortcut: async () => {
+      if (!runningInTauri()) {
+        return;
+      }
+      try {
+        const status = await shortcutCapture(true);
+        set({
+          shortcutAccelerator: status.accelerator,
+          shortcutRegistered: status.registered,
+          shortcutError: status.error,
+        });
+      } catch (reason: unknown) {
+        set({ shortcutError: errorText(reason) });
+        throw reason;
+      }
+    },
+    resumeShortcut: async () => {
+      if (!runningInTauri()) {
+        return;
+      }
+      try {
+        const status = await shortcutCapture(false);
+        set({
+          shortcutAccelerator: status.accelerator,
+          shortcutRegistered: status.registered,
+          shortcutError: status.error,
+        });
+      } catch (reason: unknown) {
+        set({ shortcutError: errorText(reason) });
       }
     },
   };

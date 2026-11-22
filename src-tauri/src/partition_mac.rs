@@ -15,8 +15,9 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject};
+use objc2::runtime::{AnyClass, AnyObject, Bool};
 use objc2::{msg_send, ClassType, MainThreadMarker};
 use objc2_foundation::{NSProcessInfo, NSString, NSURL};
 use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
@@ -29,9 +30,9 @@ use url::Url;
 
 use crate::partition::{
     authorize_panes, backend_detail, backend_name, default_workspace, identifier_string,
-    isolation_failure, official_site, parse_marker, partition_identifier, plan_pane_crash,
-    read_workspace, site_label, storage_hint, store_kind_for_major, OpenPane, PaneSpec,
-    PartitionStoreKind, ProbeReport, ProbeSample, RebuildGate, OFFICIAL_SITES,
+    isolation_failure, official_site, pane_should_freeze, parse_marker, partition_identifier,
+    plan_pane_crash, read_workspace, site_label, storage_hint, store_kind_for_major, OpenPane,
+    PaneSpec, PartitionStoreKind, ProbeReport, ProbeSample, RebuildGate, OFFICIAL_SITES,
 };
 
 static OAUTH_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -42,6 +43,9 @@ static PANES: LazyLock<Mutex<HashMap<String, LivePane>>> =
 static GATES: LazyLock<Mutex<HashMap<String, RebuildGate>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static FOCUSED_LABEL: Mutex<String> = Mutex::new(String::new());
+static SHELL_VISIBLE: AtomicBool = AtomicBool::new(true);
+static FROZEN: LazyLock<Mutex<HashMap<String, bool>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone)]
 struct LivePane {
@@ -68,6 +72,99 @@ const POPUP_CLOSE_SCRIPT: &str = r#"
   };
 })();
 "#;
+
+pub fn note_shell_visible(app: &AppHandle, visible: bool) {
+    SHELL_VISIBLE.store(visible, Ordering::SeqCst);
+    let focused = FOCUSED_LABEL
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    let labels: Vec<(String, bool)> = lock_panes()
+        .iter()
+        .map(|(label, pane)| (label.clone(), pane.visible))
+        .collect();
+    for (label, pane_visible) in labels {
+        let freeze = !pane_visible || pane_should_freeze(label == focused, visible);
+        request_freeze(app, &label, freeze);
+    }
+}
+
+fn sync_freeze(app: &AppHandle, label: &str, focused: bool) {
+    let pane_visible = lock_panes()
+        .get(label)
+        .map(|pane| pane.visible)
+        .unwrap_or(true);
+    let freeze = !pane_visible || pane_should_freeze(focused, SHELL_VISIBLE.load(Ordering::SeqCst));
+    request_freeze(app, label, freeze);
+}
+
+fn request_freeze(app: &AppHandle, label: &str, freeze: bool) {
+    {
+        let mut frozen = FROZEN.lock().unwrap_or_else(|err| err.into_inner());
+        if frozen.get(label) == Some(&freeze) {
+            return;
+        }
+        frozen.insert(label.to_string(), freeze);
+    }
+    let app = app.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        let Some(webview) = app.get_webview(&label) else {
+            FROZEN
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .remove(&label);
+            return;
+        };
+        let _ = webview.with_webview(move |platform| {
+            let desired = FROZEN
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .get(&label)
+                .copied()
+                .unwrap_or(freeze);
+            apply_page_freeze(platform.inner(), desired);
+        });
+    });
+}
+
+fn apply_page_freeze(view: *mut std::ffi::c_void, freeze: bool) {
+    if view.is_null() {
+        return;
+    }
+    let view = view as *mut AnyObject;
+    let page_sel = if freeze {
+        objc2::runtime::Sel::register(c"_suspendPage:")
+    } else {
+        objc2::runtime::Sel::register(c"_resumePage:")
+    };
+    let page_ok: bool = unsafe { msg_send![view, respondsToSelector: page_sel] };
+    if page_ok {
+        let block = RcBlock::new(|_ok: Bool| {});
+        unsafe {
+            if freeze {
+                let _: () = msg_send![view, _suspendPage: &*block];
+            } else {
+                let _: () = msg_send![view, _resumePage: &*block];
+            }
+        }
+    }
+    let media_sel = if freeze {
+        objc2::runtime::Sel::register(c"_suspendAllMediaPlayback")
+    } else {
+        objc2::runtime::Sel::register(c"_resumeAllMediaPlayback")
+    };
+    let media_ok: bool = unsafe { msg_send![view, respondsToSelector: media_sel] };
+    if media_ok {
+        unsafe {
+            if freeze {
+                let _: () = msg_send![view, _suspendAllMediaPlayback];
+            } else {
+                let _: () = msg_send![view, _resumeAllMediaPlayback];
+            }
+        }
+    }
+}
 
 pub fn sync_panes(app: AppHandle, panes: Vec<PaneSpec>) -> Result<(), String> {
     let workspace = read_workspace(&app)?;
@@ -97,7 +194,9 @@ pub fn focus_partition(app: &AppHandle, app_id: &str) -> Result<(), String> {
         return Ok(());
     };
     webview.show().map_err(|err| err.to_string())?;
-    focus_once(&webview, &label)
+    focus_once(app, &webview, &label)?;
+    sync_freeze(app, &label, true);
+    Ok(())
 }
 
 pub fn hide_partitions(app: &AppHandle) -> Result<(), String> {
@@ -142,17 +241,19 @@ fn ensure_visible(
         place(&webview, pane.x, pane.y, pane.width, pane.height)?;
         webview.show().map_err(|err| err.to_string())?;
         if pane.focus {
-            focus_once(&webview, &label)?;
+            focus_once(app, &webview, &label)?;
         }
+        sync_freeze(app, &label, pane.focus);
         return Ok(());
     }
     reset_rebuild_gate(&label);
     create_child(app, &label, pane, kind)?;
     if pane.focus {
         if let Some(webview) = app.get_webview(&label) {
-            focus_once(&webview, &label)?;
+            focus_once(app, &webview, &label)?;
         }
     }
+    sync_freeze(app, &label, pane.focus);
     Ok(())
 }
 
@@ -208,6 +309,8 @@ fn rebuild_crashed_pane(app: &AppHandle, crashed_label: &str) {
     if app.get_webview(crashed_label).is_some() {
         if let Some(webview) = app.get_webview(crashed_label) {
             if webview.reload().is_ok() {
+                let focused = focused_label_is(crashed_label);
+                sync_freeze(app, crashed_label, focused && runtime.visible);
                 emit_pane(
                     app,
                     "pane-rebuilt",
@@ -249,6 +352,15 @@ fn rebuild_crashed_pane(app: &AppHandle, crashed_label: &str) {
         if let Some(webview) = app.get_webview(crashed_label) {
             let _ = webview.hide();
         }
+        request_freeze(app, crashed_label, true);
+    } else {
+        let focused = focused_label_is(crashed_label);
+        if focused {
+            if let Some(webview) = app.get_webview(crashed_label) {
+                let _ = webview.set_focus();
+            }
+        }
+        sync_freeze(app, crashed_label, focused);
     }
     emit_pane(
         app,
@@ -275,7 +387,10 @@ fn hide_unlisted(app: &AppHandle, keep: &[String]) -> Result<(), String> {
             continue;
         }
         if let Some(webview) = app.get_webview(&label) {
+            request_freeze(app, &label, true);
             webview.hide().map_err(|err| err.to_string())?;
+        } else {
+            request_freeze(app, &label, true);
         }
         if let Some(pane) = lock_panes().get_mut(&label) {
             pane.visible = false;
@@ -285,19 +400,38 @@ fn hide_unlisted(app: &AppHandle, keep: &[String]) -> Result<(), String> {
 }
 
 fn close_label(app: &AppHandle, label: &str) -> Result<(), String> {
+    FROZEN
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(label);
     let Some(webview) = app.get_webview(label) else {
         return Ok(());
     };
     webview.close().map_err(|err| err.to_string())
 }
 
-fn focus_once(webview: &tauri::Webview, label: &str) -> Result<(), String> {
-    let mut focused = FOCUSED_LABEL.lock().unwrap_or_else(|err| err.into_inner());
-    if *focused == label {
-        return Ok(());
+fn focused_label_is(label: &str) -> bool {
+    FOCUSED_LABEL
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_str()
+        == label
+}
+
+fn focus_once(app: &AppHandle, webview: &tauri::Webview, label: &str) -> Result<(), String> {
+    let previous = {
+        let mut focused = FOCUSED_LABEL.lock().unwrap_or_else(|err| err.into_inner());
+        if *focused == label {
+            return Ok(());
+        }
+        let previous = focused.clone();
+        webview.set_focus().map_err(|err| err.to_string())?;
+        *focused = label.to_string();
+        previous
+    };
+    if !previous.is_empty() && previous != label {
+        request_freeze(app, &previous, true);
     }
-    webview.set_focus().map_err(|err| err.to_string())?;
-    *focused = label.to_string();
     Ok(())
 }
 

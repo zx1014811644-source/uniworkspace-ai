@@ -150,6 +150,53 @@ if (catalog.apps.length !== webIds.length + nativeIds.length) {
   fail("unexpected catalog size");
 }
 
+const compat = JSON.parse(
+  readFileSync(new URL("../catalog/compatibility.json", import.meta.url), "utf8"),
+);
+
+if (compat.schemaVersion !== 1) fail("compatibility schemaVersion");
+if (compat.nativeSnapLimit !== 1) fail("native snap limit must stay 1");
+if (compat.nativeSnapCeiling !== 2) fail("native snap ceiling must stay 2");
+if (compat.nativeSnapLimit > compat.nativeSnapCeiling) fail("snap limit above ceiling");
+if ("webUrl" in compat || "bundleId" in compat) {
+  fail("compatibility checklist must not carry urls or bundle ids");
+}
+if (!Array.isArray(compat.openP0)) fail("openP0 must be an array");
+for (const item of compat.openP0) {
+  if (typeof item !== "string" || item.length < 4) fail("openP0 entry");
+  if (/https?:\/\//.test(item) || item.includes("com.") || item.includes("ai.")) {
+    fail("openP0 must not invent a url or bundle id");
+  }
+}
+
+function sameIds(actual, expected, label) {
+  const left = [...actual].sort().join(",");
+  const right = [...expected].sort().join(",");
+  if (left !== right) fail(`${label} ids must be ${right}`);
+}
+
+sameIds(compat.confirmedWeb, Object.keys(officialUrls), "confirmed web");
+sameIds(compat.pendingDoNotOpen, pendingWebIds, "pending web");
+sameIds(compat.confirmedDesktop, Object.keys(confirmedBundles), "confirmed desktop");
+sameIds(compat.pendingBundle, pendingBundleIds, "pending bundle");
+
+for (const id of compat.confirmedWeb) {
+  const app = catalog.apps.find((entry) => entry.id === id);
+  if (!app || app.webUrl !== officialUrls[id]) fail(`${id} checklist url drifted`);
+}
+for (const id of compat.pendingDoNotOpen) {
+  const app = catalog.apps.find((entry) => entry.id === id);
+  if (!app || app.webUrl !== null) fail(`${id} must stay closed`);
+}
+for (const id of compat.confirmedDesktop) {
+  const app = catalog.apps.find((entry) => entry.id === id);
+  if (!app || app.bundleId !== confirmedBundles[id]) fail(`${id} checklist bundle drifted`);
+}
+for (const id of compat.pendingBundle) {
+  const app = catalog.apps.find((entry) => entry.id === id);
+  if (!app || app.bundleId !== null) fail(`${id} bundle must stay empty`);
+}
+
 if (errors.length > 0) {
   console.error(errors.join("\n"));
   process.exit(1);

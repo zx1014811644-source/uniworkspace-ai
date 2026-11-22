@@ -22,7 +22,9 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .setup(|app| {
+            detector::refresh_web_only_cache(app.handle());
             snap::recover_orphans(app.handle());
+            shortcuts::install(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -40,6 +42,9 @@ pub fn run() {
             snap::snap_attach,
             snap::snap_update,
             snap::snap_detach,
+            shortcuts::shortcut_status,
+            shortcuts::shortcut_set,
+            shortcuts::shortcut_capture,
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {
