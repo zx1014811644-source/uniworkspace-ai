@@ -372,6 +372,35 @@ pub fn authorize_panes(
     Ok(opened)
 }
 
+/// The focused pane runs only while the shell window is visible.
+/// Every other web pane stays frozen so inactive AI pages do not keep spinning.
+pub fn pane_should_freeze(focused: bool, shell_visible: bool) -> bool {
+    !shell_visible || !focused
+}
+
+/// A click inside a native webview updates focus before the shell's React
+/// state does. Keep that choice until the shell echoes it, so the next pane
+/// sync does not freeze the page the user just clicked.
+pub fn resolve_pane_focus(
+    requested: Option<&str>,
+    native: &str,
+    native_age_ms: u128,
+    fresh_ms: u128,
+) -> Option<String> {
+    let native_fresh = !native.is_empty() && native_age_ms < fresh_ms;
+    if native_fresh && requested != Some(native) {
+        return Some(native.to_string());
+    }
+    if let Some(requested) = requested {
+        return Some(requested.to_string());
+    }
+    if native.is_empty() {
+        None
+    } else {
+        Some(native.to_string())
+    }
+}
+
 /// A crashed partition webview is the only pane that gets rebuilt.
 /// The shell, login popups, and every other open pane stay as they are.
 pub fn plan_pane_crash(crashed_label: &str, open_labels: &[String]) -> PaneCrashPlan {
@@ -514,6 +543,35 @@ fn sample(app_id: &str, local_storage: &str, cookie: &str) -> ProbeSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inactive_panes_freeze_and_the_focused_pane_runs_only_while_shown() {
+        assert!(!pane_should_freeze(true, true));
+        assert!(pane_should_freeze(false, true));
+        assert!(pane_should_freeze(true, false));
+        assert!(pane_should_freeze(false, false));
+    }
+
+    #[test]
+    fn a_fresh_native_click_wins_until_the_shell_echoes_it() {
+        assert_eq!(
+            resolve_pane_focus(Some("partition-chatgpt"), "partition-claude", 20, 800).as_deref(),
+            Some("partition-claude")
+        );
+        assert_eq!(
+            resolve_pane_focus(Some("partition-claude"), "partition-claude", 20, 800).as_deref(),
+            Some("partition-claude")
+        );
+        assert_eq!(
+            resolve_pane_focus(Some("partition-deepseek"), "partition-claude", 2_000, 800)
+                .as_deref(),
+            Some("partition-deepseek")
+        );
+        assert_eq!(
+            resolve_pane_focus(None, "partition-kimi", 5_000, 800).as_deref(),
+            Some("partition-kimi")
+        );
+    }
 
     #[test]
     fn partition_identifiers_are_stable_distinct_and_not_nil() {

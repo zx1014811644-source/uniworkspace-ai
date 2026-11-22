@@ -5,6 +5,7 @@ import { useShellStore } from "../store";
 import { runningInTauri } from "../window";
 import { embedTarget, visibleCount, type LayoutMode } from "../workspace";
 import { AccessibilityBanner } from "./AccessibilityBanner";
+import { ShortcutControl } from "./ShortcutControl";
 
 export function ContentArea() {
   const ready = useShellStore((state) => state.ready);
@@ -38,6 +39,7 @@ function PaneGrid() {
   const snap = useShellStore((state) => state.snap);
   const snapRequest = useShellStore((state) => state.snapRequest);
   const snapBusy = useShellStore((state) => state.snapBusy);
+  const shortcutError = useShellStore((state) => state.shortcutError);
   const count = visibleCount(layout);
 
   useLayoutEffect(() => {
@@ -142,8 +144,12 @@ function PaneGrid() {
         <LayoutButton mode="single" label="单窗" />
         <LayoutButton mode="split" label="1:1" />
         <LayoutButton mode="grid" label="田字格" />
+        <ShortcutControl />
         <ClearButton />
       </div>
+      {shortcutError ? (
+        <p className="shrink-0 px-3 py-2 text-xs leading-5 text-[#8a3d32]">{shortcutError}</p>
+      ) : null}
       {syncError ? (
         <p className="shrink-0 px-3 py-2 text-xs leading-5 text-[#8a3d32]">{syncError}</p>
       ) : null}
@@ -242,6 +248,9 @@ function Pane({
         <span className="truncate text-xs font-medium">
           {snap ? snap.name || "桌面应用" : target?.name ?? "空格"}
         </span>
+        {target && !focused && !snap && runningInTauri() ? (
+          <span className="shrink-0 text-[11px] text-shell-muted">已暂停</span>
+        ) : null}
         {note && !snap ? (
           <span className="truncate text-[11px] text-shell-accent">{note}</span>
         ) : null}

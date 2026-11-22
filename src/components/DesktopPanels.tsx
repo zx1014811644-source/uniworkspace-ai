@@ -29,6 +29,8 @@ export function DesktopPanels() {
   const snap = useShellStore((state) => state.snap);
   const snapError = useShellStore((state) => state.snapError);
   const snapNote = useShellStore((state) => state.snapNote);
+  const a11yChoice = useShellStore((state) => state.a11yChoice);
+  const a11yTrusted = useShellStore((state) => state.a11yTrusted);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerNote, setPickerNote] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
@@ -136,6 +138,11 @@ export function DesktopPanels() {
         </ul>
         {snap ? (
           <p className="px-2 pt-2 text-[11px] leading-5 text-shell-muted">{snap.message}</p>
+        ) : null}
+        {a11yChoice === "webOnly" || (inApp && scanned && !a11yTrusted) ? (
+          <p className="px-2 pt-2 text-[11px] leading-5 text-shell-muted">
+            网页分屏可以继续使用。桌面窗口不会被移动。
+          </p>
         ) : null}
         {snapNote ? <p className="px-2 pt-2 text-[11px] leading-5 text-shell-muted">{snapNote}</p> : null}
         {snapError ? <p className="px-2 pt-2 text-[11px] leading-5 text-[#8a3d32]">{snapError}</p> : null}

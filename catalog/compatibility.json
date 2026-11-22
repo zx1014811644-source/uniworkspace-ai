@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "nativeSnapLimit": 1,
+  "nativeSnapCeiling": 2,
+  "confirmedWeb": [
+    "chatgpt",
+    "claude",
+    "gemini",
+    "kimi",
+    "doubao",
+    "workbuddy",
+    "deepseek"
+  ],
+  "confirmedDesktop": [
+    "chatgpt-desktop",
+    "claude-desktop",
+    "lm-studio",
+    "gemini-desktop",
+    "kimi-desktop",
+    "doubao-desktop",
+    "cursor-desktop"
+  ],
+  "pendingDoNotOpen": ["accio-work", "cursor", "harness"],
+  "pendingBundle": ["workbuddy-desktop", "harness-desktop", "accio-work-desktop"],
+  "openP0": []
+}

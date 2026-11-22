@@ -33,7 +33,7 @@ export function AccessibilityBanner() {
       <h2 className="text-sm font-medium">辅助功能</h2>
       <p className="mt-1 max-w-3xl text-xs leading-5 text-shell-muted">
         把已确认的桌面应用吸附到分屏，以及列出屏幕上的窗口，需要 macOS
-        的辅助功能权限（Level 2）。只有点「吸附」时才会移动那个窗口。网页分屏、登录和自定义链接不需要这项权限。拒绝或稍后授权时，工作台继续可用，也不会移动任何窗口。指定窗口只列出，不移动。
+        的辅助功能权限（Level 2）。只有点「吸附」时才会移动那个窗口。网页分屏、登录和自定义链接不需要这项权限。拒绝或选择「仅使用网页」之后，工作台继续可用，也不会移动任何窗口。全局热键只显示或隐藏本应用的主窗口，不需要这项权限。指定窗口只列出，不移动。
       </p>
       <p className="mt-1 text-xs text-shell-ink">
         当前：{trusted ? "已授权" : "未授权"}

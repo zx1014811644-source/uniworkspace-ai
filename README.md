@@ -4,7 +4,7 @@
 
 最低系统版本是 macOS 13。
 
-在 Mac 上核对登录、分屏和单个 WebView 崩溃，按 `docs/week3-m1.md`。桌面检测、辅助功能引导、指定窗口和本机端口，按 `docs/week4-detection-a11y.md`。Claude Desktop 的吸附通路按 `docs/week5-snap.md`。全部已确认桌面端的吸附、全屏、Space 边缘和对方先退出，按 `docs/week6-m2.md`。云端不能代替那次 Mac 点验。
+在 Mac 上核对登录、分屏和单个 WebView 崩溃，按 `docs/week3-m1.md`。桌面检测、辅助功能引导、指定窗口和本机端口，按 `docs/week4-detection-a11y.md`。Claude Desktop 的吸附通路按 `docs/week5-snap.md`。全部已确认桌面端的吸附、全屏、Space 边缘和对方先退出，按 `docs/week6-m2.md`。全局热键、权限降级、非当前格暂停和兼容清单，按 `docs/week7-m3.md`。云端不能代替那次 Mac 点验。
 
 ## 在 Mac 上开发
 
@@ -85,10 +85,14 @@ Tauri 2.12 的 `WebviewBuilder` 还没有单独的崩溃回调，应用级的 `o
 
 侧栏会标出已经在跑的、目录里核对过 Bundle ID 的桌面应用，也可以把一个可见窗口指定进侧栏。指定窗口只列出，不移动。`127.0.0.1` 的 8188、11434、1234 只显示开或关。ComfyUI 若打开，只打开 `http://127.0.0.1:8188/` 的网页视图。
 
-辅助功能在第一次使用时说明原因，可以由用户发起系统授权。拒绝之后，网页分屏照常使用，吸附也不会移动窗口。
+Bundle ID 已确认的桌面应用可以吸附到当前格子：ChatGPT Desktop、Claude Desktop、LM Studio、Gemini Desktop、Kimi Desktop、豆包 Desktop 和 Cursor Desktop。格子里是透明占位，辅助功能去掉边框并对齐；主窗口移动、缩放、全屏和切换空间时它跟着走。拆卸、卸下格子、主窗口退出或对方先退出时还原边框和层级，不留下无边框孤窗。如果系统不允许去掉边框，就改成在主窗口旁边跟随，不做窗口镜像。同一时间只吸附一个。没有确认桌面 ID 的应用只走网页。拖动时允许轻微缝隙。
 
-Bundle ID 已确认的桌面应用可以吸附到当前格子：ChatGPT Desktop、Claude Desktop、LM Studio、Gemini Desktop、Kimi Desktop、豆包 Desktop 和 Cursor Desktop。格子里是透明占位，辅助功能去掉边框并对齐；主窗口移动、缩放、全屏和切换空间时它跟着走。拆卸、卸下格子、主窗口退出或对方先退出时还原边框和层级，不留下无边框孤窗。如果系统不允许去掉边框，就改成在主窗口旁边跟随，不做窗口镜像。同一时间只吸附一个。没有确认桌面 ID 的应用只走网页。
+全局热键默认是 Option+Space，可以在内容区改成别的组合。它在任意桌面空间都能把主窗口带到当前空间；主窗口已经是当前空间的焦点时，再按一次就隐藏。和聚焦搜索、访达搜索、输入法或表情面板抢同一个按键的组合不会注册，回调也不会停在主线程上等待，避免和系统快捷键卡住。
 
-步骤在 `docs/week6-m2.md`。拖动时允许轻微缝隙。全局热键和公证还没有做。`shortcuts` 仍是占位。目录里未核对的网址和 Bundle ID 保持为空。
+辅助功能在第一次使用时说明原因，可以由用户发起系统授权。拒绝或选择「仅使用网页」之后，网页分屏照常使用，吸附也不会移动窗口。
 
-本周不包含 Windows、Linux，也不包含给 Accio Work、Cursor、Harness 编造网页地址。
+当前格以外的网页分区会暂停。主窗口被热键隐藏时，全部分区网页暂停。建议同时吸附的原生窗口不超过两个，这一周不把吸附扩成多窗口。
+
+已确认网页和已确认桌面应用的点验清单在 `docs/week7-m3.md`。Accio Work、Cursor、Harness 的网页地址，以及 WorkBuddy、Accio Work、Harness 的桌面 Bundle ID，保持为空。
+
+本周不包含 Windows、Linux，也不包含安装包和公证。

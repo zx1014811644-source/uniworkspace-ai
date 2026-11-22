@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -375,6 +376,23 @@ pub fn load_choice(dir: &Path) -> A11yChoice {
     parse_choice(&text)
 }
 
+static WEB_ONLY: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn web_only_cached() -> bool {
+    WEB_ONLY.load(Ordering::Acquire)
+}
+
+pub(crate) fn set_web_only_cache(choice: A11yChoice) {
+    WEB_ONLY.store(choice == A11yChoice::WebOnly, Ordering::Release);
+}
+
+pub(crate) fn refresh_web_only_cache(app: &AppHandle) {
+    let choice = support_dir(app)
+        .map(|dir| load_choice(&dir))
+        .unwrap_or(A11yChoice::Pending);
+    set_web_only_cache(choice);
+}
+
 pub fn store_choice(dir: &Path, choice: A11yChoice) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|err| format!("无法创建应用数据目录: {err}"))?;
     let body = serde_json::to_string_pretty(&ChoiceFile { choice })
@@ -530,6 +548,7 @@ fn a11y_choose_blocking(app: AppHandle, choice: A11yChoice) -> Result<A11yStatus
     let trusted = current_trusted(&app);
     let choice = apply_choice(choice, trusted)?;
     store_choice(&support_dir(&app)?, choice)?;
+    set_web_only_cache(choice);
     Ok(status_now(&app, trusted))
 }
 
@@ -837,5 +856,17 @@ mod tests {
         assert_eq!(load_choice(&dir), A11yChoice::Pending);
         assert_eq!(parse_choice(r#"{"choice":"granted"}"#), A11yChoice::Granted);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn web_only_cache_follows_the_choice_and_starts_able_to_move() {
+        set_web_only_cache(A11yChoice::Pending);
+        assert!(!web_only_cached());
+        set_web_only_cache(A11yChoice::Granted);
+        assert!(!web_only_cached());
+        set_web_only_cache(A11yChoice::WebOnly);
+        assert!(web_only_cached());
+        set_web_only_cache(A11yChoice::Pending);
+        assert!(!web_only_cached());
     }
 }
