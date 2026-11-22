@@ -1,35 +1,22 @@
 //! macOS window bridge.
 //!
-//! Week 4 reads running apps and on-screen windows, and it can ask for the
-//! Accessibility permission when the user starts that step. It still does not
-//! move, resize, follow, or strip another window. Those calls stay out of this
-//! file until geometric snapping is actually implemented.
-//!
-//! Reading the on-screen list uses `CGWindowListCopyWindowInfo`, which does not
-//! prompt. `AXIsProcessTrusted` only queries. The prompt option is used from the
+//! Listing windows uses `CGWindowListCopyWindowInfo` and does not prompt.
+//! `AXIsProcessTrusted` only queries. The prompt option is used from the
 //! onboarding command, not while the shell is starting.
+//!
+//! Geometric snap lives in `snap` / `snap_mac`. It moves a foreign window with
+//! Accessibility. It does not reparent that window into this process.
 
 #[cfg(target_os = "macos")]
 use tauri::AppHandle;
 
 pub fn status() -> &'static str {
     if cfg!(target_os = "macos") {
-        "window_mac: list windows and a11y prompt; snap placeholder"
+        "window_mac: list windows, a11y prompt, geometric snap"
     } else {
-        "window_mac: placeholder, inactive off macOS"
+        "window_mac: geometric snap inactive off macOS"
     }
 }
-
-// Week 5 geometric snap, not implemented:
-//
-// The content placeholder would be an NSView frame in this window, the same
-// bounds the partition webviews already receive from the shell. It stays an
-// opaque window. Moving the other app would use AXUIElementSetAttributeValue
-// for position and size, then a display link only while a snap is active.
-// AX coordinates are top-left; AppKit screen coordinates are bottom-left.
-// None of that runs this week. Do not add an observer that writes frames.
-//
-// See docs/week2-a11y-placeholder-research.md and docs/week4-detection-a11y.md.
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -158,8 +145,8 @@ mod macos {
         }
         let pid = i32::try_from(number_i64(item, "kCGWindowOwnerPID")?).ok()?;
         let layer = i32::try_from(number_i64(item, "kCGWindowLayer")?).ok()?;
-        let (width, height) =
-            bounds_size(object_for(item, "kCGWindowBounds")).unwrap_or((-1.0, -1.0));
+        let (x, y, width, height) =
+            bounds_rect(object_for(item, "kCGWindowBounds")).unwrap_or((-1.0, -1.0, -1.0, -1.0));
         Some(RawWindow {
             window_id,
             pid,
@@ -168,6 +155,8 @@ mod macos {
             layer,
             on_screen: bool_key(item, "kCGWindowIsOnscreen").unwrap_or(true),
             alpha: f64_key(item, "kCGWindowAlpha").unwrap_or(1.0),
+            x,
+            y,
             width,
             height,
         })
@@ -285,13 +274,27 @@ mod macos {
         Some(value)
     }
 
-    fn bounds_size(bounds: *mut AnyObject) -> Option<(f64, f64)> {
+    fn bounds_rect(bounds: *mut AnyObject) -> Option<(f64, f64, f64, f64)> {
         if bounds.is_null() || !is_class(bounds, c"NSDictionary") {
             return None;
         }
+        let x = f64_key(bounds, "X")?;
+        let y = f64_key(bounds, "Y")?;
         let width = f64_key(bounds, "Width")?;
         let height = f64_key(bounds, "Height")?;
-        Some((width, height))
+        Some((x, y, width, height))
+    }
+
+    pub(super) fn snapshot_here() -> Result<MacSnapshot, String> {
+        collect_snapshot()
+    }
+
+    pub(super) fn windows_here() -> Vec<RawWindow> {
+        collect_windows().0
+    }
+
+    pub(super) fn trusted_here() -> bool {
+        unsafe { AXIsProcessTrusted() != 0 }
     }
 }
 
@@ -315,12 +318,34 @@ pub(crate) fn open_settings(app: &AppHandle) -> Result<(), String> {
     macos::open_settings(app)
 }
 
+/// Caller must already be the main thread. `observe` hops to the main thread
+/// itself, so calling it from there deadlocks.
+#[cfg(target_os = "macos")]
+pub(crate) fn snapshot_on_caller_thread() -> Result<crate::detector::MacSnapshot, String> {
+    macos::snapshot_here()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn trusted_on_caller_thread() -> bool {
+    macos::trusted_here()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn windows_on_caller_thread() -> Vec<crate::detector::RawWindow> {
+    macos::windows_here()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
-    fn reports_placeholder_and_does_not_claim_snap_is_active() {
+    fn reports_geometric_snap_only_on_macos() {
         let text = super::status();
-        assert!(text.contains("placeholder"));
-        assert!(text.contains("snap") || text.contains("inactive"));
+        if cfg!(target_os = "macos") {
+            assert!(text.contains("geometric snap"));
+            assert!(!text.contains("inactive"));
+        } else {
+            assert!(text.contains("inactive"));
+            assert!(text.contains("geometric snap"));
+        }
     }
 }

@@ -12,6 +12,15 @@ import {
 } from "./desktop";
 import { errorText, focusPartition } from "./partitions";
 import {
+  SNAP_TARGET_ID,
+  snapAttach,
+  snapDetach,
+  snapUpdate,
+  type SnapStatus,
+  type SnapFrame,
+  type SnapMode,
+} from "./snap";
+import {
   defaultWorkspace,
   loadWorkspace,
   normalizeHttpUrl,
@@ -67,6 +76,23 @@ interface ShellState {
   openA11ySettings: () => Promise<void>;
   refreshA11y: () => Promise<void>;
   chooseA11y: (choice: A11yChoice) => Promise<void>;
+  snap: LiveSnap | null;
+  snapRequest: number | null;
+  snapBusy: boolean;
+  snapError: string | null;
+  snapNote: string | null;
+  askSnap: () => void;
+  attachSnap: (paneIndex: number, frame: SnapFrame) => Promise<void>;
+  updateSnapFrame: (frame: SnapFrame) => Promise<void>;
+  detachSnap: () => Promise<void>;
+  applySnapEnded: (status: SnapStatus) => void;
+}
+
+export interface LiveSnap {
+  appId: string;
+  paneIndex: number;
+  mode: Exclude<SnapMode, "inactive">;
+  message: string;
 }
 
 const A11Y_KEY = "uniworkspace.a11y.v1";
@@ -90,7 +116,17 @@ function snapshot(state: ShellState): WorkspaceFile {
 }
 
 let chain: Promise<void> = Promise.resolve();
+let snapChain: Promise<void> = Promise.resolve();
 let revision = 0;
+
+function enqueueSnap(task: () => Promise<void>): Promise<void> {
+  const run = snapChain.then(task, task);
+  snapChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
 
 export const useShellStore = create<ShellState>((set, get) => {
   const commit = (
@@ -172,6 +208,11 @@ export const useShellStore = create<ShellState>((set, get) => {
     a11yTrusted: false,
     a11yChoice: "pending",
     a11yError: null,
+    snap: null,
+    snapRequest: null,
+    snapBusy: false,
+    snapError: null,
+    snapNote: null,
     boot: async () => {
       try {
         const file = await loadWorkspace();
@@ -218,11 +259,16 @@ export const useShellStore = create<ShellState>((set, get) => {
         });
       }
     },
-    setLayout: (layout) =>
-      commit((file) => {
+    setLayout: async (layout) => {
+      const snap = get().snap;
+      if (snap && snap.paneIndex >= visibleCount(layout)) {
+        await get().detachSnap();
+      }
+      await commit((file) => {
         const focusedPane = file.focusedPane >= visibleCount(layout) ? 0 : file.focusedPane;
         return { ...file, layout, focusedPane };
-      }),
+      });
+    },
     focusPane: async (index) => {
       if (index < 0 || index >= visibleCount(get().layout)) {
         return;
@@ -236,6 +282,10 @@ export const useShellStore = create<ShellState>((set, get) => {
       await focusSlot(index);
     },
     assignApp: async (appId) => {
+      const snap = get().snap;
+      if (snap && snap.paneIndex === get().focusedPane) {
+        await get().detachSnap();
+      }
       let reopen = false;
       await commit((file) => {
         const slots = [...file.slots];
@@ -263,8 +313,11 @@ export const useShellStore = create<ShellState>((set, get) => {
       }
       await focusSlot(get().focusedPane);
     },
-    clearPane: (index) =>
-      commit((file) => {
+    clearPane: async (index) => {
+      if (get().snap?.paneIndex === index) {
+        await get().detachSnap();
+      }
+      await commit((file) => {
         if (!file.slots[index]) {
           return file;
         }
@@ -272,12 +325,17 @@ export const useShellStore = create<ShellState>((set, get) => {
           ...file,
           slots: file.slots.map((slot, slotIndex) => (slotIndex === index ? null : slot)),
         };
-      }),
-    clearAllPanes: () =>
-      commit((file) => ({
+      });
+    },
+    clearAllPanes: async () => {
+      if (get().snap) {
+        await get().detachSnap();
+      }
+      await commit((file) => ({
         ...file,
         slots: [null, null, null, null],
-      })),
+      }));
+    },
     addCustomUrl: async (raw, displayName) => {
       let url: string;
       try {
@@ -385,6 +443,98 @@ export const useShellStore = create<ShellState>((set, get) => {
       } catch (reason: unknown) {
         set({ a11yError: errorText(reason) });
       }
+    },
+    askSnap: () => {
+      set({ snapRequest: get().focusedPane, snapError: null, snapNote: null });
+    },
+    attachSnap: (paneIndex, frame) =>
+      enqueueSnap(async () => {
+        set({ snapBusy: true, snapRequest: null, snapError: null });
+        try {
+          const status = await snapAttach(SNAP_TARGET_ID, frame);
+          if (!status.active || status.mode === "inactive") {
+            set({
+              snap: null,
+              snapBusy: false,
+              snapError: status.message,
+            });
+            return;
+          }
+          set({
+            snap: {
+              appId: SNAP_TARGET_ID,
+              paneIndex,
+              mode: status.mode,
+              message: status.message ?? "",
+            },
+            snapBusy: false,
+            snapNote: null,
+          });
+        } catch (reason: unknown) {
+          set({
+            snap: null,
+            snapBusy: false,
+            snapRequest: null,
+            snapError: errorText(reason),
+          });
+        }
+      }),
+    updateSnapFrame: (frame) =>
+      enqueueSnap(async () => {
+        const current = get().snap;
+        if (!current) {
+          return;
+        }
+        try {
+          const status = await snapUpdate(frame);
+          const latest = get().snap;
+          if (!latest || latest.paneIndex !== current.paneIndex) {
+            return;
+          }
+          if (!status.active || status.mode === "inactive") {
+            set({ snap: null, snapError: status.message });
+            return;
+          }
+          if (status.mode !== latest.mode || (status.message ?? "") !== latest.message) {
+            set({
+              snap: {
+                ...latest,
+                mode: status.mode,
+                message: status.message ?? "",
+              },
+            });
+          }
+        } catch (reason: unknown) {
+          if (get().snap) {
+            set({ snapError: errorText(reason) });
+          }
+        }
+      }),
+    detachSnap: () =>
+      enqueueSnap(async () => {
+        set({ snapBusy: true, snapRequest: null });
+        try {
+          const status = await snapDetach();
+          set({
+            snap: null,
+            snapBusy: false,
+            snapError: null,
+            snapNote: status.message,
+          });
+        } catch (reason: unknown) {
+          set({ snapBusy: false, snapError: errorText(reason) });
+        }
+      }),
+    applySnapEnded: (status) => {
+      if (status.active) {
+        return;
+      }
+      set({
+        snap: null,
+        snapRequest: null,
+        snapNote: null,
+        snapError: status.message,
+      });
     },
     chooseA11y: async (choice) => {
       if (!runningInTauri()) {

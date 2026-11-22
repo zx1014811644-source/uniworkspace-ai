@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { appsByKind, catalog } from "../catalog";
 import { comfyOpenUrl, type ListedWindow, type ServiceStatus } from "../desktop";
+import { SNAP_TARGET_ID } from "../snap";
 import { useShellStore } from "../store";
 import { runningInTauri } from "../window";
 
@@ -25,6 +26,10 @@ export function DesktopPanels() {
   const undesignate = useShellStore((state) => state.undesignate);
   const reopenA11y = useShellStore((state) => state.reopenA11y);
   const addCustomUrl = useShellStore((state) => state.addCustomUrl);
+  const askSnap = useShellStore((state) => state.askSnap);
+  const snap = useShellStore((state) => state.snap);
+  const snapError = useShellStore((state) => state.snapError);
+  const snapNote = useShellStore((state) => state.snapNote);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerNote, setPickerNote] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
@@ -57,18 +62,32 @@ export function DesktopPanels() {
           ) : (
             <ul className="mt-1 space-y-0.5">
               {running.map((app) => (
-                <li key={app.appId}>
+                <li
+                  key={app.appId}
+                  title={`${app.bundleId} · ${app.processName} · ${app.pid}`}
+                  className="flex items-center rounded-md px-2 py-1.5 text-sm hover:bg-black/5"
+                >
                   <button
                     type="button"
-                    title={`${app.bundleId} · ${app.processName} · ${app.pid}`}
-                    className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-black/5"
+                    className="min-w-0 flex-1 truncate text-left"
                     onClick={() => {
                       inspect(app.appId);
                     }}
                   >
-                    <span className="truncate">{app.name}</span>
-                    <span className="ml-2 shrink-0 text-[10px] text-shell-accent">运行中</span>
+                    {app.name}
                   </button>
+                  {app.appId === SNAP_TARGET_ID ? (
+                    <button
+                      type="button"
+                      className="ml-2 shrink-0 text-[10px] text-shell-accent"
+                      onClick={() => {
+                        askSnap();
+                      }}
+                    >
+                      {snap?.appId === app.appId ? "跟随中" : "吸附"}
+                    </button>
+                  ) : null}
+                  <span className="ml-2 shrink-0 text-[10px] text-shell-accent">运行中</span>
                 </li>
               ))}
             </ul>
@@ -116,6 +135,11 @@ export function DesktopPanels() {
             );
           })}
         </ul>
+        {snap ? (
+          <p className="px-2 pt-2 text-[11px] leading-5 text-shell-muted">{snap.message}</p>
+        ) : null}
+        {snapNote ? <p className="px-2 pt-2 text-[11px] leading-5 text-shell-muted">{snapNote}</p> : null}
+        {snapError ? <p className="px-2 pt-2 text-[11px] leading-5 text-[#8a3d32]">{snapError}</p> : null}
         {scanError ? <p className="px-2 pt-2 text-[11px] leading-5 text-[#8a3d32]">{scanError}</p> : null}
       </section>
       <section className="px-2">
