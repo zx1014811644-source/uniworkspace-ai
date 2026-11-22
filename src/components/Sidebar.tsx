@@ -128,11 +128,9 @@ function CustomRow({ id, name }: { id: string; name: string }) {
 }
 
 function Inspected({ app }: { app: CatalogApp }) {
-  let text = "这一周只吸附 Claude Desktop。这个应用只检测，不移动窗口。";
-  if (app.id === "claude-desktop") {
-    text =
-      "先点右侧一格，再点运行中的「吸附」。窗口对齐到这一格，拆卸时还原边框。指定窗口仍然只列出，不移动。";
-  } else if (pendingWeb(app)) {
+  let text =
+    "先点右侧一格，再点运行中的「吸附」。窗口对齐到这一格；拆卸、卸下格子或对方先退出时还原边框。指定窗口仍然只列出，不移动。";
+  if (pendingWeb(app)) {
     text = "没有已确认的官方网页入口，所以不会打开 WebView，也不会猜一个地址。这不阻挡其他网页。";
   } else if (app.kind === "native" && app.bundleIdStatus === "pending") {
     text = "Bundle ID 还没有核对，不会把它当成已检测到的桌面应用，也不会猜一个标识。";

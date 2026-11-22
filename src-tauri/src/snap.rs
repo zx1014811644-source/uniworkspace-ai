@@ -1,17 +1,20 @@
-//! Week 5 geometric snap for one confirmed Electron app.
+//! Geometric snap for every desktop app whose Bundle ID is confirmed.
 //!
 //! macOS cannot reparent a foreign window, so this module never calls
 //! `SetParent` or `addChildWindow`. The shell punches a placeholder in one
 //! pane. Accessibility removes the target window's chrome and aligns it to
 //! that rectangle. A display link (or a 60fps timer if the link cannot start)
 //! keeps position, size, Space, and z-order in step with the host window.
-//! Detach, pane unload, and process exit put the chrome and stacking back.
+//! Detach, pane unload, host exit, and the target quitting first put the
+//! chrome and stacking back. A borderless window must not be left behind.
 //!
 //! If Accessibility will not remove the chrome or will not accept the
 //! placeholder rectangle, the same follow loop places the window beside the
 //! host instead. Window mirroring is not implemented.
 //!
-//! Manual 「指定窗口」 stays a list. It does not call into this module.
+//! One confirmed app is snapped at a time. Attaching another restores the
+//! previous window first. Manual 「指定窗口」 stays a list. It does not call
+//! into this module. Apps with no confirmed Bundle ID stay Web-only.
 
 use std::path::{Path, PathBuf};
 
@@ -20,12 +23,16 @@ use tauri::{AppHandle, Manager};
 
 use crate::detector::{self, RawWindow};
 
-/// Catalog id of the only desktop app this week will move.
-/// The bundle id is read from `CONFIRMED_DESKTOP`, which tests pin to the catalog.
-pub const SNAP_TARGET_ID: &str = "claude-desktop";
 pub const FOLLOW_HZ: u64 = 60;
 pub const FOLLOW_INTERVAL_NS: u64 = 1_000_000_000 / FOLLOW_HZ;
-pub const FRAME_EPSILON: f64 = 0.5;
+/// Sub-pixel disagreement between Accessibility and the window list.
+/// Follow ignores anything inside this band so the window is not rewritten
+/// every vsync. A slight gap while dragging is acceptable.
+pub const FOLLOW_EPSILON: f64 = 2.0;
+/// Failed position writes in a row before follow gives up and restores chrome.
+pub const FOLLOW_WRITE_BUDGET: u32 = 45;
+/// Display frames to wait while a fullscreen window is leaving fullscreen.
+pub const FULLSCREEN_EXIT_BUDGET: u32 = 90;
 pub const SIDE_GAP: f64 = 12.0;
 pub const SIDE_MIN_ROOM: f64 = 320.0;
 pub const MIN_TARGET_EDGE: f64 = 200.0;
@@ -33,7 +40,7 @@ pub const RECOVERY_FILE: &str = "snap-recovery.json";
 
 pub fn status() -> &'static str {
     if cfg!(target_os = "macos") {
-        "snap: claude-desktop geometric follow"
+        "snap: confirmed desktop geometric follow"
     } else {
         "snap: inactive off macOS"
     }
@@ -113,6 +120,9 @@ pub struct RecoveryFile {
     pub chrome: Vec<ChromeRecord>,
     pub enhanced: Option<bool>,
     pub manual: Option<bool>,
+    /// `AXFullScreen` before the first mutation. `None` means it was not readable.
+    #[serde(default)]
+    pub fullscreen: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,11 +149,14 @@ pub struct FollowInput {
     pub local_placeholder: Rect,
     pub current: Rect,
     pub display: Rect,
-    pub host_space: Option<u64>,
-    pub target_space: Option<u64>,
+    /// Every Space the host window currently belongs to. A window on a Space
+    /// edge is listed on more than one. Empty means the Space is unknown.
+    pub host_spaces: Vec<u64>,
+    pub target_spaces: Vec<u64>,
     pub target_above_host: bool,
     pub ax_rejected: bool,
     pub target_visible: bool,
+    pub target_process_alive: bool,
     pub minimized: bool,
     pub space_move_failed: bool,
 }
@@ -155,21 +168,35 @@ pub enum AfterChromeMove {
 }
 
 pub fn is_snap_target(app_id: &str) -> bool {
-    app_id == SNAP_TARGET_ID
-        && detector::CONFIRMED_DESKTOP
-            .iter()
-            .any(|app| app.id == app_id && !app.bundle_id.is_empty())
+    target_parts(app_id).is_some()
 }
 
-pub fn target_parts() -> Option<(&'static str, &'static str, &'static str)> {
+pub fn target_parts(app_id: &str) -> Option<(&'static str, &'static str, &'static str)> {
     detector::CONFIRMED_DESKTOP
         .iter()
-        .find(|app| app.id == SNAP_TARGET_ID)
+        .find(|app| app.id == app_id && !app.bundle_id.is_empty())
         .map(|app| (app.id, app.name, app.bundle_id))
 }
 
+pub fn confirmed_bundle(bundle_id: &str) -> bool {
+    !bundle_id.is_empty()
+        && detector::CONFIRMED_DESKTOP
+            .iter()
+            .any(|app| app.bundle_id == bundle_id)
+}
+
 pub fn idle_status() -> SnapStatus {
-    let (id, name, bundle) = target_parts().unwrap_or((SNAP_TARGET_ID, "Claude Desktop", ""));
+    SnapStatus {
+        target_app_id: String::new(),
+        target_name: String::new(),
+        target_bundle_id: String::new(),
+        active: false,
+        mode: SnapMode::Inactive,
+        message: None,
+    }
+}
+
+pub fn status_for(id: &str, name: &str, bundle: &str) -> SnapStatus {
     SnapStatus {
         target_app_id: id.to_string(),
         target_name: name.to_string(),
@@ -192,19 +219,22 @@ pub fn frame_usable(frame: &SnapFrame) -> bool {
 
 /// `None` means attach may continue. A string means do not move the window.
 pub fn rejection(app_id: &str, trusted: bool, running: bool, has_window: bool) -> Option<String> {
-    if !is_snap_target(app_id) {
-        return Some("这一周只吸附 Claude Desktop。指定窗口和其他桌面应用不会被移动。".to_string());
-    }
-    if !trusted {
+    let Some((_, name, _)) = target_parts(app_id) else {
         return Some(
-            "需要辅助功能才能吸附。网页分屏可以继续使用，这个窗口没有被移动。".to_string(),
+            "只有目录里已确认 Bundle ID 的桌面应用可以吸附。指定窗口和其他应用不会被移动。"
+                .to_string(),
         );
+    };
+    if !trusted {
+        return Some(format!(
+            "需要辅助功能才能吸附。网页分屏可以继续使用，{name} 没有被移动。"
+        ));
     }
     if !running {
-        return Some("Claude Desktop 没有在运行。".to_string());
+        return Some(format!("{name} 没有在运行。"));
     }
     if !has_window {
-        return Some("没有找到 Claude Desktop 可移动的窗口。".to_string());
+        return Some(format!("没有找到 {name} 可移动的窗口。"));
     }
     None
 }
@@ -339,27 +369,197 @@ pub fn rollback_chrome(chrome_dirty: bool, mode: Option<SnapMode>) -> bool {
     chrome_dirty && mode != Some(SnapMode::Embedded)
 }
 
-/// The recovery file may be deleted only after every chrome write succeeded.
-/// A frame write is required only when this restore is supposed to move the window.
+/// The recovery file may be deleted only after every chrome write that still
+/// matters has succeeded. A frame write is required only when this restore is
+/// supposed to move the window.
 pub fn recovery_may_clear(chrome_ok: bool, frame_requested: bool, frame_ok: bool) -> bool {
     chrome_ok && (!frame_requested || frame_ok)
 }
 
+/// A failed Accessibility write does not fail restore when the live value is
+/// already the saved one. Side-by-side follow often rewrites read-only chrome
+/// that was never changed. A value that is still different, or that cannot be
+/// read, still blocks clearing the recovery file.
+pub fn chrome_write_blocks_restore(saved: bool, current: Option<bool>, write_ok: bool) -> bool {
+    if write_ok {
+        return false;
+    }
+    !matches!(current, Some(value) if value == saved)
+}
+
+pub fn recovery_blocked_message() -> &'static str {
+    "上一个窗口的边框还没还原，这次没有开始新的吸附，也没有覆盖还原记录。"
+}
+
+/// A fullscreen target has to leave fullscreen before its frame can match a pane.
+pub fn should_exit_fullscreen(is_fullscreen: bool) -> bool {
+    is_fullscreen
+}
+
+/// While fullscreen is still exiting, skip the frame write for this vsync.
+pub fn hold_for_fullscreen_exit(is_fullscreen: bool) -> bool {
+    is_fullscreen
+}
+
+/// Move only after the Space change has committed.
+/// Sharing any Space means the window is still on the edge between them.
+/// An unknown target Space is not spammed with moves.
+pub fn space_move_needed(host: &[u64], target: &[u64], failed: bool) -> Option<u64> {
+    if failed || host.is_empty() || target.is_empty() {
+        return None;
+    }
+    if target.iter().any(|space| host.contains(space)) {
+        return None;
+    }
+    host.first().copied()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayLinkPlan {
+    Keep,
+    Retarget(u32),
+}
+
+/// Bind the display link to the display under the host. An unknown display
+/// keeps whatever link is already running.
+pub fn follow_display(host_display: Option<u32>, link_display: Option<u32>) -> DisplayLinkPlan {
+    match host_display {
+        Some(host) if link_display == Some(host) => DisplayLinkPlan::Keep,
+        Some(host) => DisplayLinkPlan::Retarget(host),
+        None => DisplayLinkPlan::Keep,
+    }
+}
+
+/// A display that already failed to create a link must not be retried on every
+/// vsync once follow has a link or the 60fps timer. A different display gets
+/// one new attempt. If neither source is running, try again.
+pub fn skip_repeated_display_link(
+    attempted: Option<u32>,
+    display: u32,
+    link_running: bool,
+    timer_running: bool,
+) -> bool {
+    attempted == Some(display) && (link_running || timer_running)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameWrite {
+    pub position: Option<(f64, f64)>,
+    pub size: Option<(f64, f64)>,
+}
+
+/// Size and position are separate Accessibility writes. A drag that only
+/// changes the origin must not also set the size, which makes Electron
+/// windows relayout and jitter.
+pub fn frame_write(current: Rect, desired: Rect, epsilon: f64) -> FrameWrite {
+    let position =
+        if (current.x - desired.x).abs() > epsilon || (current.y - desired.y).abs() > epsilon {
+            Some((desired.x, desired.y))
+        } else {
+            None
+        };
+    let size = if (current.width - desired.width).abs() > epsilon
+        || (current.height - desired.height).abs() > epsilon
+    {
+        Some((desired.width, desired.height))
+    } else {
+        None
+    };
+    FrameWrite { position, size }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteOutcome {
+    Wrote,
+    WaitingForFullscreen,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FollowHealth {
+    pub write_failures: u32,
+    pub fullscreen_waits: u32,
+}
+
+pub fn advance_follow_health(health: FollowHealth, outcome: WriteOutcome) -> (FollowHealth, bool) {
+    match outcome {
+        WriteOutcome::Wrote => (
+            FollowHealth {
+                write_failures: 0,
+                fullscreen_waits: 0,
+            },
+            false,
+        ),
+        WriteOutcome::WaitingForFullscreen => {
+            let fullscreen_waits = health.fullscreen_waits.saturating_add(1);
+            let stop = fullscreen_waits >= FULLSCREEN_EXIT_BUDGET;
+            (
+                FollowHealth {
+                    write_failures: 0,
+                    fullscreen_waits,
+                },
+                stop,
+            )
+        }
+        WriteOutcome::Failed => {
+            let write_failures = health.write_failures.saturating_add(1);
+            let stop = write_failures >= FOLLOW_WRITE_BUDGET;
+            (
+                FollowHealth {
+                    write_failures,
+                    fullscreen_waits: health.fullscreen_waits,
+                },
+                stop,
+            )
+        }
+    }
+}
+
+/// Delete the recovery file after the target disappears only when chrome was
+/// restored, or when no Accessibility window remains to be left borderless.
+pub fn clear_recovery_after_target_gone(ax_window_alive: bool, chrome_restored: bool) -> bool {
+    !ax_window_alive || chrome_restored
+}
+
+pub fn unreadable_window_message(name: &str) -> String {
+    format!("读不到 {name} 的窗口，没有移动它。")
+}
+
+pub fn unreadable_frame_message(name: &str) -> String {
+    format!("读不到 {name} 的窗口位置，没有移动它。")
+}
+
+pub fn host_missing_message(name: &str) -> String {
+    format!("找不到主窗口，没有移动 {name}。")
+}
+
+pub fn chrome_restore_failed_message(name: &str) -> String {
+    format!("没能还原 {name} 的边框。下次启动会再试。")
+}
+
+pub fn target_gone_message(name: &str) -> String {
+    format!("{name} 已退出或窗口已关闭，吸附结束。")
+}
+
+pub fn minimized_message(name: &str) -> String {
+    format!("{name} 已最小化，边框已还原，吸附结束。")
+}
+
 pub fn plan_follow(input: &FollowInput) -> FollowPlan {
+    if !input.target_process_alive || !input.target_visible {
+        return FollowPlan {
+            frame: None,
+            raise_above_host: false,
+            move_to_space: None,
+            stop: Some(StopReason::TargetGone),
+        };
+    }
     if input.minimized {
         return FollowPlan {
             frame: None,
             raise_above_host: false,
             move_to_space: None,
             stop: Some(StopReason::Minimized),
-        };
-    }
-    if !input.target_visible {
-        return FollowPlan {
-            frame: None,
-            raise_above_host: false,
-            move_to_space: None,
-            stop: Some(StopReason::TargetGone),
         };
     }
     if input.ax_rejected || matches!(input.mode, SnapMode::Inactive) {
@@ -375,19 +575,19 @@ pub fn plan_follow(input: &FollowInput) -> FollowPlan {
         SnapMode::SideBySide => side_by_side_rect(input.host, input.display),
         SnapMode::Inactive => unreachable!("inactive already returned"),
     };
-    let frame = if rects_close(desired, input.current, FRAME_EPSILON) {
+    let frame = if rects_close(desired, input.current, FOLLOW_EPSILON) {
         None
     } else {
         Some(desired)
     };
-    let move_to_space = match (input.host_space, input.target_space) {
-        (Some(host), Some(target)) if host != target && !input.space_move_failed => Some(host),
-        _ => None,
-    };
     FollowPlan {
         frame,
         raise_above_host: !input.target_above_host,
-        move_to_space,
+        move_to_space: space_move_needed(
+            &input.host_spaces,
+            &input.target_spaces,
+            input.space_move_failed,
+        ),
         stop: None,
     }
 }
@@ -410,11 +610,18 @@ pub fn recovery_path(dir: &Path) -> PathBuf {
 
 pub fn write_recovery(dir: &Path, file: &RecoveryFile) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|err| format!("无法记录吸附还原信息: {err}"))?;
+    let path = recovery_path(dir);
+    if path.exists() {
+        return Err(recovery_blocked_message().to_string());
+    }
     let body =
         serde_json::to_vec_pretty(file).map_err(|err| format!("无法记录吸附还原信息: {err}"))?;
-    let path = recovery_path(dir);
     let tmp = dir.join("snap-recovery.json.tmp");
     std::fs::write(&tmp, &body).map_err(|err| format!("无法记录吸附还原信息: {err}"))?;
+    if path.exists() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(recovery_blocked_message().to_string());
+    }
     std::fs::rename(&tmp, &path).map_err(|err| format!("无法记录吸附还原信息: {err}"))?;
     Ok(())
 }
@@ -565,56 +772,84 @@ mod tests {
             local_placeholder: rect(240.0, 48.0, 520.0, 500.0),
             current: rect(0.0, 0.0, 100.0, 100.0),
             display: rect(0.0, 0.0, 1440.0, 900.0),
-            host_space: Some(1),
-            target_space: Some(1),
+            host_spaces: vec![1],
+            target_spaces: vec![1],
             target_above_host: true,
             ax_rejected: false,
             target_visible: true,
+            target_process_alive: true,
             minimized: false,
             space_move_failed: false,
         }
     }
 
     #[test]
-    fn only_claude_desktop_is_the_week5_snap_target() {
+    fn every_confirmed_desktop_app_can_snap_and_pending_ids_cannot() {
         let catalog: serde_json::Value =
             serde_json::from_str(include_str!("../../catalog/apps.json")).unwrap();
         let apps = catalog["apps"].as_array().unwrap();
-        let claude = apps
-            .iter()
-            .find(|app| app["id"] == "claude-desktop")
-            .unwrap();
-        assert_eq!(claude["bundleId"], "com.anthropic.claudefordesktop");
-        assert_eq!(claude["bundleIdStatus"], "confirmed");
-        assert_eq!(claude["kind"], "native");
-        let (id, name, bundle) = target_parts().unwrap();
-        assert_eq!(id, SNAP_TARGET_ID);
-        assert_eq!(id, "claude-desktop");
-        assert_eq!(name, claude["name"].as_str().unwrap());
-        assert_eq!(bundle, "com.anthropic.claudefordesktop");
-        assert!(is_snap_target("claude-desktop"));
+        let expected = [
+            ("chatgpt-desktop", "com.openai.codex", "ChatGPT Desktop"),
+            (
+                "claude-desktop",
+                "com.anthropic.claudefordesktop",
+                "Claude Desktop",
+            ),
+            ("lm-studio", "ai.elementlabs.lmstudio", "LM Studio"),
+            ("gemini-desktop", "com.google.GeminiMacOS", "Gemini Desktop"),
+            ("kimi-desktop", "com.moonshot.kimichat", "Kimi Desktop"),
+            ("doubao-desktop", "com.bot.pc.doubao", "豆包 Desktop"),
+            (
+                "cursor-desktop",
+                "com.todesktop.230313mzl4w4u92",
+                "Cursor Desktop",
+            ),
+        ];
+        assert_eq!(expected.len(), detector::CONFIRMED_DESKTOP.len());
+        for (id, bundle, name) in expected {
+            let app = apps.iter().find(|app| app["id"] == id).unwrap();
+            assert_eq!(app["bundleId"], bundle, "{id}");
+            assert_eq!(app["bundleIdStatus"], "confirmed", "{id}");
+            assert_eq!(app["kind"], "native", "{id}");
+            assert_eq!(app["name"], name, "{id}");
+            let (found_id, found_name, found_bundle) = target_parts(id).unwrap();
+            assert_eq!(found_id, id);
+            assert_eq!(found_name, name);
+            assert_eq!(found_bundle, bundle);
+            assert!(is_snap_target(id), "{id}");
+            assert!(confirmed_bundle(bundle), "{bundle}");
+            assert!(rejection(id, true, true, true).is_none(), "{id}");
+        }
         for id in [
-            "chatgpt-desktop",
-            "lm-studio",
-            "gemini-desktop",
-            "kimi-desktop",
-            "doubao-desktop",
-            "cursor-desktop",
             "cursor",
             "claude",
+            "chatgpt",
             "workbuddy-desktop",
             "harness-desktop",
             "accio-work-desktop",
+            "deepseek",
         ] {
             assert!(!is_snap_target(id), "{id}");
+            assert!(rejection(id, true, true, true).is_some(), "{id}");
         }
-        assert!(detector::CONFIRMED_DESKTOP
-            .iter()
-            .all(|app| app.id == "cursor-desktop"
-                || app.bundle_id != "com.todesktop.230313mzl4w4u92"));
+        for id in ["workbuddy-desktop", "harness-desktop", "accio-work-desktop"] {
+            let app = apps.iter().find(|app| app["id"] == id).unwrap();
+            assert!(app["bundleId"].is_null(), "{id}");
+            assert_eq!(app["bundleIdStatus"], "pending", "{id}");
+        }
+        for id in ["accio-work", "cursor", "harness"] {
+            let app = apps.iter().find(|app| app["id"] == id).unwrap();
+            assert!(app["webUrl"].is_null(), "{id}");
+            assert_eq!(app["webStatus"], "pending", "{id}");
+        }
+        assert!(detector::CONFIRMED_DESKTOP.iter().all(|app| {
+            app.id == "cursor-desktop" || app.bundle_id != "com.todesktop.230313mzl4w4u92"
+        }));
         let cursor_web = apps.iter().find(|app| app["id"] == "cursor").unwrap();
         assert!(cursor_web["bundleId"].is_null());
-        assert!(cursor_web["webUrl"].is_null());
+        assert!(!confirmed_bundle("com.tencent.workbuddy.mac"));
+        assert!(!confirmed_bundle("com.deepseek.dsh"));
+        assert!(!confirmed_bundle(""));
     }
 
     #[test]
@@ -622,16 +857,18 @@ mod tests {
         let refused = rejection("claude-desktop", false, true, true).unwrap();
         assert!(refused.contains("网页分屏"));
         assert!(refused.contains("没有被移动"));
-        assert!(rejection("claude-desktop", true, false, true)
-            .unwrap()
-            .contains("没有在运行"));
-        assert!(rejection("claude-desktop", true, true, false)
+        assert!(refused.contains("Claude Desktop"));
+        let stopped = rejection("lm-studio", true, false, true).unwrap();
+        assert!(stopped.contains("没有在运行"));
+        assert!(stopped.contains("LM Studio"));
+        assert!(rejection("chatgpt-desktop", true, true, false)
             .unwrap()
             .contains("没有找到"));
-        let other = rejection("cursor-desktop", true, true, true).unwrap();
+        let other = rejection("workbuddy-desktop", true, true, true).unwrap();
         assert!(other.contains("指定窗口"));
         assert!(other.contains("不会被移动"));
-        assert!(rejection("workbuddy-desktop", true, true, true).is_some());
+        assert!(rejection("harness-desktop", true, true, true).is_some());
+        assert!(rejection("cursor-desktop", true, true, true).is_none());
         assert!(rejection("claude-desktop", true, true, true).is_none());
     }
 
@@ -734,6 +971,18 @@ mod tests {
         assert!(rollback_chrome(true, None));
         assert!(!rollback_chrome(true, Some(SnapMode::Embedded)));
         assert!(!rollback_chrome(false, Some(SnapMode::SideBySide)));
+        assert!(
+            !chrome_write_blocks_restore(false, Some(false), false),
+            "an unchanged read-only value is already restored"
+        );
+        assert!(!chrome_write_blocks_restore(true, Some(true), true));
+        assert!(chrome_write_blocks_restore(false, Some(true), false));
+        assert!(chrome_write_blocks_restore(false, None, false));
+        assert!(recovery_may_clear(true, true, true));
+        assert!(
+            !recovery_may_clear(false, false, true),
+            "a real chrome failure still keeps the recovery file"
+        );
         assert!(!recovery_may_clear(false, true, true));
         assert!(!recovery_may_clear(false, false, true));
         assert!(!recovery_may_clear(true, true, false));
@@ -761,7 +1010,7 @@ mod tests {
         );
 
         input.target_above_host = false;
-        input.target_space = Some(4);
+        input.target_spaces = vec![4];
         let stacked = plan_follow(&input);
         assert!(stacked.raise_above_host);
         assert_eq!(stacked.move_to_space, Some(1));
@@ -775,9 +1024,20 @@ mod tests {
         input.target_visible = false;
         assert_eq!(plan_follow(&input).stop, Some(StopReason::TargetGone));
         input.target_visible = true;
+        input.target_process_alive = false;
+        assert_eq!(plan_follow(&input).stop, Some(StopReason::TargetGone));
+        input.target_process_alive = true;
         input.minimized = true;
         assert_eq!(plan_follow(&input).stop, Some(StopReason::Minimized));
         assert!(plan_follow(&input).frame.is_none());
+
+        input.minimized = false;
+        input.current = placeholder_rect(input.host, input.local_placeholder);
+        input.current.x += 1.0;
+        assert!(
+            plan_follow(&input).frame.is_none(),
+            "a 1px disagreement stays inside the follow gap"
+        );
     }
 
     #[test]
@@ -837,6 +1097,7 @@ mod tests {
             }],
             enhanced: Some(false),
             manual: None,
+            fullscreen: Some(false),
         };
         write_recovery(&dir, &file).unwrap();
         let text = std::fs::read_to_string(recovery_path(&dir)).unwrap();
@@ -849,6 +1110,198 @@ mod tests {
         clear_recovery(&dir);
         assert!(read_recovery(&dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_snap_does_not_overwrite_an_unrestored_recovery_file() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("uniworkspace-snap-keep-{nanos}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let original = RecoveryFile {
+            bundle_id: "com.anthropic.claudefordesktop".into(),
+            pid: 42,
+            window_id: 7,
+            x: 12.0,
+            y: 24.0,
+            width: 800.0,
+            height: 600.0,
+            below_window: Some(3),
+            space: Some(9),
+            chrome: vec![ChromeRecord {
+                attribute: "AXTitleUIElement".into(),
+                hidden: false,
+            }],
+            enhanced: Some(false),
+            manual: None,
+            fullscreen: Some(false),
+        };
+        write_recovery(&dir, &original).unwrap();
+        let replacement = RecoveryFile {
+            bundle_id: "com.openai.codex".into(),
+            pid: 90,
+            window_id: 11,
+            x: 1.0,
+            y: 1.0,
+            width: 400.0,
+            height: 300.0,
+            below_window: None,
+            space: None,
+            chrome: vec![ChromeRecord {
+                attribute: "AXCloseButton".into(),
+                hidden: true,
+            }],
+            enhanced: None,
+            manual: None,
+            fullscreen: None,
+        };
+        let err = write_recovery(&dir, &replacement).unwrap_err();
+        assert!(err.contains("没有覆盖"));
+        assert_eq!(read_recovery(&dir).unwrap().chrome, original.chrome);
+        assert_eq!(
+            read_recovery(&dir).unwrap().bundle_id,
+            "com.anthropic.claudefordesktop"
+        );
+        assert!(!recovery_may_clear(false, true, true));
+        assert!(read_recovery(&dir).is_some());
+        clear_recovery(&dir);
+        write_recovery(&dir, &replacement).unwrap();
+        assert_eq!(read_recovery(&dir).unwrap().bundle_id, "com.openai.codex");
+        clear_recovery(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_recovery_without_fullscreen_still_loads() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("uniworkspace-snap-legacy-{nanos}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            recovery_path(&dir),
+            r#"{
+              "bundleId": "com.anthropic.claudefordesktop",
+              "pid": 7,
+              "windowId": 9,
+              "x": 1.0,
+              "y": 2.0,
+              "width": 300.0,
+              "height": 200.0,
+              "belowWindow": null,
+              "space": 3,
+              "chrome": [],
+              "enhanced": null,
+              "manual": null
+            }"#,
+        )
+        .unwrap();
+        let file = read_recovery(&dir).unwrap();
+        assert_eq!(file.bundle_id, "com.anthropic.claudefordesktop");
+        assert!(file.fullscreen.is_none());
+        clear_recovery(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn space_edges_wait_until_the_windows_no_longer_share_a_space() {
+        assert_eq!(space_move_needed(&[1, 2], &[2], false), None);
+        assert_eq!(space_move_needed(&[2], &[1, 2], false), None);
+        assert_eq!(space_move_needed(&[4], &[1], false), Some(4));
+        assert_eq!(space_move_needed(&[4], &[1], true), None);
+        assert_eq!(space_move_needed(&[], &[1], false), None);
+        assert_eq!(space_move_needed(&[4], &[], false), None);
+        assert_eq!(space_move_needed(&[8, 9], &[8], false), None);
+    }
+
+    #[test]
+    fn fullscreen_exit_and_follow_health_do_not_drop_a_window_early() {
+        assert!(should_exit_fullscreen(true));
+        assert!(!should_exit_fullscreen(false));
+        assert!(hold_for_fullscreen_exit(true));
+        assert!(!hold_for_fullscreen_exit(false));
+        let health = FollowHealth {
+            write_failures: 0,
+            fullscreen_waits: 0,
+        };
+        let (waiting, stop) = advance_follow_health(health, WriteOutcome::WaitingForFullscreen);
+        assert!(!stop);
+        assert_eq!(waiting.fullscreen_waits, 1);
+        assert_eq!(waiting.write_failures, 0);
+        let mut health = waiting;
+        let mut stopped = false;
+        for _ in 0..(FULLSCREEN_EXIT_BUDGET - 1) {
+            let (next, stop) = advance_follow_health(health, WriteOutcome::WaitingForFullscreen);
+            health = next;
+            stopped = stop;
+        }
+        assert!(stopped);
+        let (failed, stop) = advance_follow_health(
+            FollowHealth {
+                write_failures: FOLLOW_WRITE_BUDGET - 2,
+                fullscreen_waits: 4,
+            },
+            WriteOutcome::Failed,
+        );
+        assert!(!stop);
+        assert_eq!(failed.write_failures, FOLLOW_WRITE_BUDGET - 1);
+        let (_, stop) = advance_follow_health(failed, WriteOutcome::Failed);
+        assert!(stop);
+        let (reset, stop) = advance_follow_health(failed, WriteOutcome::Wrote);
+        assert!(!stop);
+        assert_eq!(reset.write_failures, 0);
+        assert_eq!(reset.fullscreen_waits, 0);
+    }
+
+    #[test]
+    fn follow_gap_skips_a_size_write_when_only_the_origin_moved() {
+        let current = rect(10.0, 20.0, 400.0, 300.0);
+        let moved = rect(18.0, 20.0, 400.0, 300.0);
+        let write = frame_write(current, moved, FOLLOW_EPSILON);
+        assert_eq!(write.position, Some((18.0, 20.0)));
+        assert!(write.size.is_none());
+        let jitter = frame_write(current, rect(11.0, 20.5, 401.0, 300.0), FOLLOW_EPSILON);
+        assert!(jitter.position.is_none());
+        assert!(jitter.size.is_none());
+        let resized = frame_write(current, rect(10.0, 20.0, 640.0, 300.0), FOLLOW_EPSILON);
+        assert!(resized.position.is_none());
+        assert_eq!(resized.size, Some((640.0, 300.0)));
+    }
+
+    #[test]
+    fn display_link_follows_the_host_display_and_keeps_a_match() {
+        assert_eq!(follow_display(Some(3), Some(3)), DisplayLinkPlan::Keep);
+        assert_eq!(
+            follow_display(Some(5), Some(3)),
+            DisplayLinkPlan::Retarget(5)
+        );
+        assert_eq!(follow_display(Some(5), None), DisplayLinkPlan::Retarget(5));
+        assert_eq!(follow_display(None, Some(3)), DisplayLinkPlan::Keep);
+        assert_eq!(follow_display(None, None), DisplayLinkPlan::Keep);
+        assert!(skip_repeated_display_link(Some(5), 5, false, true));
+        assert!(skip_repeated_display_link(Some(5), 5, true, false));
+        assert!(!skip_repeated_display_link(Some(5), 5, false, false));
+        assert!(!skip_repeated_display_link(Some(5), 8, false, true));
+        assert!(!skip_repeated_display_link(None, 5, false, true));
+    }
+
+    #[test]
+    fn a_quit_keeps_recovery_when_the_borderless_window_is_still_there() {
+        assert!(!clear_recovery_after_target_gone(true, false));
+        assert!(clear_recovery_after_target_gone(true, true));
+        assert!(clear_recovery_after_target_gone(false, false));
+        assert!(clear_recovery_after_target_gone(false, true));
+        assert!(target_gone_message("ChatGPT Desktop").contains("ChatGPT Desktop"));
+        assert!(target_gone_message("LM Studio").contains("吸附结束"));
+        assert!(minimized_message("Gemini Desktop").contains("边框已还原"));
+        assert!(chrome_restore_failed_message("Kimi Desktop").contains("下次启动会再试"));
+        assert!(unreadable_window_message("豆包 Desktop").contains("没有移动"));
+        assert!(host_missing_message("Cursor Desktop").contains("没有移动"));
+        assert!(status().contains("snap"));
     }
 
     #[test]
